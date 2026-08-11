@@ -19,7 +19,6 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -94,6 +93,7 @@ _R_NAME  = Qt.ItemDataRole.UserRole + 1  # display name (basename)
 _R_MTIME = Qt.ItemDataRole.UserRole + 2  # last-modified time
 _R_KIND  = Qt.ItemDataRole.UserRole + 3  # "dir" | "fav"
 _R_PATH  = Qt.ItemDataRole.UserRole + 4  # absolute path
+_R_CONN  = Qt.ItemDataRole.UserRole + 5  # saved connection name
 
 
 class _PeerSignals(QObject):
@@ -171,30 +171,50 @@ class PeerSyncPanel(QWidget):
         self._status_lbl = MutedLabel("Connect to the other computer to begin.")
         host_layout.addWidget(self._status_lbl)
 
+        # ── Saved connections panel ────────────────────────────────────
+        saved_card = GlassCard(host)
+        saved_layout = QVBoxLayout(saved_card)
+        saved_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
+        saved_layout.setSpacing(T.PAD_SM)
+        saved_layout.addWidget(SectionLabel("Saved connections"))
+
+        self._conn_list = QListWidget()
+        self._conn_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._conn_list.setMinimumHeight(96)
+        self._conn_list.setMaximumHeight(180)
+        self._conn_list.currentRowChanged.connect(self._on_conn_selected)
+        self._conn_list.itemDoubleClicked.connect(self._load_connection)
+        self._conn_list.setStyleSheet(
+            f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
+            f" border-radius: 8px; padding: 4px; }}"
+            f"QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}"
+            f"QListWidget::item:selected {{ background-color: {T.BG_HOVER};"
+            f" border: 1px solid {T.ACCENT}; }}"
+        )
+        saved_layout.addWidget(self._conn_list)
+
+        saved_btn_row = QHBoxLayout()
+        self._load_conn_btn = PrimaryButton("Load", saved_card, command=self._load_connection)
+        saved_btn_row.addWidget(self._load_conn_btn)
+        save_btn = GhostButton("Save current connection", saved_card, command=self._save_connection)
+        saved_btn_row.addWidget(save_btn)
+        self._delete_conn_btn = GhostButton("Delete", saved_card, command=self._delete_connection)
+        saved_btn_row.addWidget(self._delete_conn_btn)
+        saved_btn_row.addStretch()
+        saved_layout.addLayout(saved_btn_row)
+
+        self._conn_hint = MutedLabel("")
+        saved_layout.addWidget(self._conn_hint)
+        host_layout.addWidget(saved_card)
+        attach_tooltip(self._conn_list, "Select a saved SSH connection and click Load to connect, "
+                                        "or click Save current connection to store the details you typed.")
+
         # ── 1 · Connection ────────────────────────────────────────────
         conn_card = GlassCard(host)
         conn_layout = QVBoxLayout(conn_card)
         conn_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
         conn_layout.setSpacing(T.PAD_SM)
         conn_layout.addWidget(SectionLabel("1 · Connect to the other computer"))
-
-        saved_row = QHBoxLayout()
-        saved_lbl = MutedLabel("Saved connections")
-        saved_row.addWidget(saved_lbl)
-        self._conn_combo = QComboBox()
-        self._conn_combo.setEditable(True)
-        self._conn_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self._conn_combo.setMinimumWidth(220)
-        self._conn_combo.currentIndexChanged.connect(self._on_conn_selected)
-        saved_row.addWidget(self._conn_combo, 1)
-        save_btn = GhostButton("Save", conn_card, command=self._save_connection)
-        saved_row.addWidget(save_btn)
-        self._delete_conn_btn = GhostButton("Delete", conn_card, command=self._delete_connection)
-        self._delete_conn_btn.setEnabled(False)
-        saved_row.addWidget(self._delete_conn_btn)
-        conn_layout.addLayout(saved_row)
-        attach_tooltip(self._conn_combo, "Pick a saved connection to fill in the details below, "
-                                         "or type a name and click Save to store the current details.")
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(T.PAD_SM)
@@ -392,15 +412,24 @@ class PeerSyncPanel(QWidget):
 
     def _populate_connections(self) -> None:
         self._connections = load_peer_connections()
-        self._conn_combo.blockSignals(True)
-        self._conn_combo.clear()
+        self._conn_list.blockSignals(True)
+        self._conn_list.clear()
         for c in self._connections:
-            self._conn_combo.addItem(self._conn_label(c), c.name)
-        self._conn_combo.blockSignals(False)
-        self._delete_conn_btn.setEnabled(bool(self._connections))
-        if self._connections:
-            self._conn_combo.setCurrentIndex(0)
+            item = QListWidgetItem(self._conn_label(c))
+            item.setData(_R_CONN, c.name)
+            item.setToolTip(f"Load {c.name} ({c.username}@{c.host}:{c.port})")
+            self._conn_list.addItem(item)
+        self._conn_list.blockSignals(False)
+        has_connections = bool(self._connections)
+        self._load_conn_btn.setEnabled(has_connections)
+        self._delete_conn_btn.setEnabled(has_connections)
+        if has_connections:
+            self._conn_list.setCurrentRow(0)
             self._fill_connection_fields(self._connections[0])
+            self._conn_hint.setText("Select a connection and click Load to connect to it.")
+        else:
+            self._conn_hint.setText("No saved connections yet - enter the details below, "
+                                    "then click 'Save current connection'.")
 
     @staticmethod
     def _conn_label(c: PeerConnectionConfig) -> str:
@@ -418,14 +447,25 @@ class PeerSyncPanel(QWidget):
             return
         self._fill_connection_fields(self._connections[index])
 
+    def _load_connection(self) -> None:
+        """Load the selected saved connection: fill the fields and connect."""
+        row = self._conn_list.currentRow()
+        if row < 0 or row >= len(self._connections):
+            QMessageBox.information(self, "Load Connection", "Select a saved connection first.")
+            return
+        conn = self._connections[row]
+        self._fill_connection_fields(conn)
+        self._status_lbl.setText(f"Loading saved connection '{conn.name}' ...")
+        self._status_lbl.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px;")
+        self._connect()
+
     def _current_connection_name(self) -> str:
-        text = self._conn_combo.currentText().strip()
-        if text and "  (" in text:
-            text = text.split("  (")[0].strip()
-        if not text:
-            user = self._user_entry.get().strip()
-            host = self._host_entry.get().strip()
-            text = f"{user}@{host}" if user else host
+        row = self._conn_list.currentRow()
+        if 0 <= row < len(self._connections):
+            return self._connections[row].name
+        user = self._user_entry.get().strip()
+        host = self._host_entry.get().strip()
+        text = f"{user}@{host}" if user else host
         return text
 
     def _save_connection(self) -> None:
@@ -450,14 +490,16 @@ class PeerSyncPanel(QWidget):
         is_new = upsert_peer_connection(conn)
         self._populate_connections()
         self._status_lbl.setText(
-            f"Saved connection '{conn.name}'. " + ("Select it from the list to connect quickly." if is_new else "Updated.")
+            f"Saved connection '{conn.name}'. " + ("Select it in the Saved connections panel and click Load to connect." if is_new else "Updated.")
         )
         self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
 
     def _delete_connection(self) -> None:
-        name = self._current_connection_name()
-        if not name:
+        row = self._conn_list.currentRow()
+        if row < 0 or row >= len(self._connections):
+            QMessageBox.information(self, "Delete Connection", "Select a saved connection first.")
             return
+        name = self._connections[row].name
         if QMessageBox.question(
             self, "Delete Connection", f"Delete saved connection '{name}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

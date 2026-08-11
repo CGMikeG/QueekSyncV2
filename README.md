@@ -104,7 +104,7 @@ If two computers both run QueekSync, you can sync folders between them over
 SSH using just the other computer's IP address and password:
 
 1. Open the **Peer Sync** page from the sidebar.
-2. Enter the other computer's IP (or hostname), SSH port, username, and password, then click **Connect**. Click **Save** above the fields to store the connection (with an optional remembered password) so you can pick it from the **Saved connections** list next time instead of re-entering the details.
+2. Enter the other computer's IP (or hostname), SSH port, username, and password, then click **Connect**. Click **Save current connection** to store the details (with an optional remembered password). Saved connections appear in the **Saved connections** panel at the top of the page - select one and click **Load** (or double-click it) to connect without re-entering the details.
 3. Both computers' folders are shown side by side (defaults to the home folders; you can change the base folder on either side).
 4. Tick the folders you want to sync — folders present on both sides are paired by name, folders checked on only one side can be copied to the other.
 5. Click **Compare Selected** to see which side is newer for each folder (file counts, latest change, and a verdict: This PC newer / Other PC newer / In sync / Only on one side).
