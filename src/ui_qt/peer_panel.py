@@ -19,6 +19,7 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -35,14 +36,20 @@ from PyQt6.QtWidgets import (
 from core.peer import (
     PairCompare,
     PeerConnection,
+    PeerConnectionConfig,
     PeerPlan,
     add_local_favorite,
     compare_pair,
+    delete_peer_connection,
     find_or_create_peer_profile,
     list_local_folders,
     load_local_favorites,
+    load_peer_connections,
     read_remote_favorites,
     remove_local_favorite,
+    save_peer_connections,
+    touch_peer_connection,
+    upsert_peer_connection,
 )
 from ui_qt import theme as T
 from ui_qt.widgets import (
@@ -126,6 +133,7 @@ class PeerSyncPanel(QWidget):
         self._app = app
         self._peer: Optional[PeerConnection] = None
         self._signals = _PeerSignals()
+        self._connections: List[PeerConnectionConfig] = load_peer_connections()
 
         # loaded state per side; None = not loaded yet
         self._folders: Dict[str, Optional[List[dict]]] = {"local": None, "remote": None}
@@ -170,6 +178,24 @@ class PeerSyncPanel(QWidget):
         conn_layout.setSpacing(T.PAD_SM)
         conn_layout.addWidget(SectionLabel("1 · Connect to the other computer"))
 
+        saved_row = QHBoxLayout()
+        saved_lbl = MutedLabel("Saved connections")
+        saved_row.addWidget(saved_lbl)
+        self._conn_combo = QComboBox()
+        self._conn_combo.setEditable(True)
+        self._conn_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._conn_combo.setMinimumWidth(220)
+        self._conn_combo.currentIndexChanged.connect(self._on_conn_selected)
+        saved_row.addWidget(self._conn_combo, 1)
+        save_btn = GhostButton("Save", conn_card, command=self._save_connection)
+        saved_row.addWidget(save_btn)
+        self._delete_conn_btn = GhostButton("Delete", conn_card, command=self._delete_connection)
+        self._delete_conn_btn.setEnabled(False)
+        saved_row.addWidget(self._delete_conn_btn)
+        conn_layout.addLayout(saved_row)
+        attach_tooltip(self._conn_combo, "Pick a saved connection to fill in the details below, "
+                                         "or type a name and click Save to store the current details.")
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(T.PAD_SM)
         grid.setVerticalSpacing(T.PAD_SM)
@@ -185,6 +211,11 @@ class PeerSyncPanel(QWidget):
         conn_layout.addLayout(grid)
 
         conn_row = QHBoxLayout()
+        self._remember_cb = QCheckBox("Remember password")
+        self._remember_cb.setChecked(True)
+        conn_row.addWidget(self._remember_cb)
+        attach_tooltip(self._remember_cb, "Store the password with the saved connection. Stored in plaintext in the "
+                                         "app config folder, like SFTP profile passwords.")
         self._connect_btn = PrimaryButton("Connect", conn_card, command=self._connect)
         conn_row.addWidget(self._connect_btn)
         self._disconnect_btn = GhostButton("Disconnect", conn_card, command=self._disconnect)
@@ -282,6 +313,7 @@ class PeerSyncPanel(QWidget):
         attach_tooltip(self._copy_missing_cb, "Folders checked on one side only are copied to the other side.")
 
         self._set_connected_ui(False)
+        self._populate_connections()
 
     def _make_folder_list(self, title: str, parent_layout: QHBoxLayout, with_fav_btn: bool) -> tuple:
         col = QWidget()
@@ -354,6 +386,89 @@ class PeerSyncPanel(QWidget):
 
         threading.Thread(target=_try, daemon=True).start()
 
+    # ==================================================================
+    # Saved connections
+    # ==================================================================
+
+    def _populate_connections(self) -> None:
+        self._connections = load_peer_connections()
+        self._conn_combo.blockSignals(True)
+        self._conn_combo.clear()
+        for c in self._connections:
+            self._conn_combo.addItem(self._conn_label(c), c.name)
+        self._conn_combo.blockSignals(False)
+        self._delete_conn_btn.setEnabled(bool(self._connections))
+        if self._connections:
+            self._conn_combo.setCurrentIndex(0)
+            self._fill_connection_fields(self._connections[0])
+
+    @staticmethod
+    def _conn_label(c: PeerConnectionConfig) -> str:
+        return f"{c.name}  ({c.username}@{c.host}:{c.port})"
+
+    def _fill_connection_fields(self, c: PeerConnectionConfig) -> None:
+        self._host_entry.set(c.host)
+        self._port_entry.set(str(c.port))
+        self._user_entry.set(c.username)
+        self._pass_entry.set(c.password if c.remember_password else "")
+        self._remember_cb.setChecked(c.remember_password)
+
+    def _on_conn_selected(self, index: int) -> None:
+        if index < 0 or index >= len(self._connections):
+            return
+        self._fill_connection_fields(self._connections[index])
+
+    def _current_connection_name(self) -> str:
+        text = self._conn_combo.currentText().strip()
+        if text and "  (" in text:
+            text = text.split("  (")[0].strip()
+        if not text:
+            user = self._user_entry.get().strip()
+            host = self._host_entry.get().strip()
+            text = f"{user}@{host}" if user else host
+        return text
+
+    def _save_connection(self) -> None:
+        host = self._host_entry.get().strip()
+        user = self._user_entry.get().strip()
+        if not host:
+            QMessageBox.warning(self, "Save Connection", "Enter the IP address or hostname first.")
+            return
+        try:
+            port = int(self._port_entry.get() or 22)
+        except ValueError:
+            port = 22
+        name = self._current_connection_name()
+        conn = PeerConnectionConfig(
+            name=name or host,
+            host=host,
+            port=port,
+            username=user,
+            password=self._pass_entry.get(),
+            remember_password=self._remember_cb.isChecked(),
+        )
+        is_new = upsert_peer_connection(conn)
+        self._populate_connections()
+        self._status_lbl.setText(
+            f"Saved connection '{conn.name}'. " + ("Select it from the list to connect quickly." if is_new else "Updated.")
+        )
+        self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
+
+    def _delete_connection(self) -> None:
+        name = self._current_connection_name()
+        if not name:
+            return
+        if QMessageBox.question(
+            self, "Delete Connection", f"Delete saved connection '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        delete_peer_connection(name)
+        self._populate_connections()
+        self._status_lbl.setText(f"Deleted connection '{name}'.")
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+
     def _on_connected(self, ok: bool, message: str) -> None:
         self._connect_btn.setEnabled(True)
         self._connect_btn.setText("Connect")
@@ -369,6 +484,16 @@ class PeerSyncPanel(QWidget):
         self._conn_detail.setText(f"Connected · home: {message}")
         self._status_lbl.setText(f"Connected to {label}.")
         self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
+
+        # move the matching saved connection to the top (most recently used)
+        match = next(
+            (c for c in self._connections
+             if c.host == self._peer.host and c.port == self._peer.port and c.username == self._peer.username),
+            None,
+        )
+        if match is not None and self._connections and self._connections[0].name != match.name:
+            touch_peer_connection(match.name)
+            self._populate_connections()
         self._reload_folders()
 
     def _disconnect(self) -> None:

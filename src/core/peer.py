@@ -16,6 +16,7 @@ import stat as stat_mod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from core.config import APP_DIR_NAME
 from core.profile import EndpointConfig, FilterConfig, Profile, SyncOptions
 from core.syncer import FileInfo, LocalFS, SFTPFS
 
@@ -74,6 +75,118 @@ def remove_local_favorite(path: str) -> bool:
     favs.remove(norm)
     save_local_favorites(favs)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Saved peer connections
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PeerConnectionConfig:
+    """A saved connection to another computer for Peer Sync."""
+
+    name: str
+    host: str
+    port: int = 22
+    username: str = ""
+    password: str = ""
+    remember_password: bool = True
+
+
+def peer_connections_path() -> str:
+    """Absolute path of the saved-connections file (app config dir)."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, APP_DIR_NAME, "peer_connections.json")
+
+
+def load_peer_connections() -> List[PeerConnectionConfig]:
+    """Load saved Peer Sync connections (empty when none exist)."""
+    try:
+        with open(peer_connections_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = data.get("connections", []) if isinstance(data, dict) else data
+        conns = []
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("host"):
+                continue
+            conns.append(
+                PeerConnectionConfig(
+                    name=str(e.get("name") or e["host"]),
+                    host=str(e["host"]),
+                    port=int(e.get("port") or 22),
+                    username=str(e.get("username") or ""),
+                    password=str(e.get("password") or ""),
+                    remember_password=bool(e.get("remember_password", True)),
+                )
+            )
+        return conns
+    except Exception:
+        return []
+
+
+def save_peer_connections(conns: List[PeerConnectionConfig]) -> None:
+    """Persist saved Peer Sync connections."""
+    data = {
+        "version": 1,
+        "connections": [
+            {
+                "name": c.name,
+                "host": c.host,
+                "port": c.port,
+                "username": c.username,
+                "password": c.password if c.remember_password else "",
+                "remember_password": c.remember_password,
+            }
+            for c in conns
+        ],
+    }
+    path = peer_connections_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def upsert_peer_connection(conn: PeerConnectionConfig) -> bool:
+    """Add or replace a saved connection (matched by name). Returns True when new."""
+    conns = load_peer_connections()
+    existing = next((c for c in conns if c.name == conn.name), None)
+    if existing is not None:
+        existing.host = conn.host
+        existing.port = conn.port
+        existing.username = conn.username
+        existing.password = conn.password if conn.remember_password else ""
+        existing.remember_password = conn.remember_password
+        save_peer_connections(conns)
+        return False
+    conns.append(conn)
+    save_peer_connections(conns)
+    return True
+
+
+def delete_peer_connection(name: str) -> bool:
+    """Remove a saved connection by name. Returns True when it existed."""
+    conns = load_peer_connections()
+    remaining = [c for c in conns if c.name != name]
+    if len(remaining) == len(conns):
+        return False
+    save_peer_connections(remaining)
+    return True
+
+
+def touch_peer_connection(name: str) -> None:
+    """Move a connection to the front of the list (most recently used)."""
+    conns = load_peer_connections()
+    conn = next((c for c in conns if c.name == name), None)
+    if conn is None:
+        return
+    conns.remove(conn)
+    conns.insert(0, conn)
+    save_peer_connections(conns)
 
 
 def read_remote_favorites(peer: "PeerConnection") -> List[str]:
