@@ -77,11 +77,22 @@ If `requirements.txt` changes later, QueekSync re-syncs the local `.venv` automa
 
 ### Linux or WSL
 
-Make launcher executable, then run:
+Run the one-time setup first - it creates the project virtual environment,
+installs all dependencies from requirements.txt, verifies the app can start,
+and prints next steps (safe to re-run; re-installs only when requirements
+change):
 
 ```bash
-chmod +x run.sh
-./run.sh
+chmod +x setup.sh
+./setup.sh
+```
+
+Then launch the app:
+
+```bash
+chmod +x run_qt.sh
+./run_qt.sh        # PyQt6 UI (recommended)
+# or: ./run.sh     # legacy customtkinter UI
 ```
 
 What happens:
