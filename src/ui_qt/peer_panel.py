@@ -336,11 +336,18 @@ class PeerSyncPanel(QWidget):
         self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
         self._direction_combo.setMinimumWidth(220)
         direction_row.addWidget(self._direction_combo)
+        self._delete_extra_cb = QCheckBox("Delete extra files at destination")
+        self._delete_extra_cb.setEnabled(False)
+        direction_row.addWidget(self._delete_extra_cb)
         direction_row.addStretch()
         plan_layout.addLayout(direction_row)
         attach_tooltip(self._direction_combo,
                        "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
                        "copied across. Pick a one-way direction to always copy that way instead.")
+        attach_tooltip(self._delete_extra_cb,
+                       "When a one-way direction is chosen, also delete files at the destination that no longer "
+                       "exist in the source (mirror sync). Not available for two-way.")
+        self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
 
         plan_row = QHBoxLayout()
         self._copy_missing_cb = QCheckBox("Copy folders that exist on only one side")
@@ -914,6 +921,10 @@ class PeerSyncPanel(QWidget):
                     item.setCheckState(Qt.CheckState.Checked)
         self._sync_selected()
 
+    def _update_direction_ui(self) -> None:
+        """Mirror-delete is only meaningful for a one-way direction."""
+        self._delete_extra_cb.setEnabled(self._direction_combo.currentData() != "auto")
+
     def _sync_selected(self) -> None:
         plans = self._selected_plans()
         if not plans:
@@ -956,9 +967,13 @@ class PeerSyncPanel(QWidget):
                 "'Copy folders that exist on only one side' is off.")
             return
 
+        delete_extra = force_mode == "one_way" and self._delete_extra_cb.isChecked()
+
         lines = []
         for plan in to_run:
             lines.append(f"- {plan.name}  →  {direction_label if direction_label else plan.direction}")
+        if delete_extra:
+            lines.append("\nExtra files at the destination will be deleted (mirror).")
         if skipped:
             lines.append(f"\nSkipped (only on one side): {', '.join(skipped)}")
         prompt = "The following folders will be synced:\n\n" + "\n".join(lines)
@@ -976,6 +991,8 @@ class PeerSyncPanel(QWidget):
                 local_root, remote_root, remote_cfg, host_label,
                 mode=force_mode, direction=force_direction,
             )
+            if delete_extra:
+                profile.options.delete_extra = True
             profile = find_or_create_peer_profile(self._app.profile_mgr, profile)
             self._app.save_profile(profile)
             self._app.start_sync(profile.id)

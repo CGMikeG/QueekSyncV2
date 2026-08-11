@@ -129,7 +129,9 @@ SSH using just the other computer's IP address and password:
 **Sync direction**: the Peer Sync page has a direction selector - **Two-way
 (automatic)** (default: folders on both computers sync both ways, one-sided
 folders are copied across), **This PC → Other PC**, or **Other PC → This PC**
-(one-way copies always go that direction).
+(one-way copies always go that direction). With a one-way direction you can
+also tick **Delete extra files at destination** to mirror: files at the
+destination that no longer exist in the source are removed.
 
 **Favourites** (★) and **sync list** (⇄) work on the **base folder**: set
 "This computer – base folder" to the folder you want (or Browse to it), then
