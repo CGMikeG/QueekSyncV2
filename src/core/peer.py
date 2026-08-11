@@ -10,6 +10,7 @@ connection, folder listing, and per-pair status comparison.
 
 from __future__ import annotations
 
+import json
 import os
 import stat as stat_mod
 from dataclasses import dataclass
@@ -20,6 +21,71 @@ from core.syncer import FileInfo, LocalFS, SFTPFS
 
 
 DEFAULT_EXCLUDES: List[str] = list(FilterConfig().exclude_patterns)
+
+# Name of the favourites file each computer keeps in its home directory.
+# It lives in the home dir so the *other* computer can read it over SFTP
+# and show these folders immediately when connecting.
+FAVORITES_FILE_NAME = ".queeksync-favorites.json"
+
+
+def favorites_file_path() -> str:
+    """Absolute path of this computer's favourites file."""
+    return os.path.join(os.path.expanduser("~"), FAVORITES_FILE_NAME)
+
+
+def load_local_favorites() -> List[str]:
+    """Load this computer's favourite folder paths (may be empty)."""
+    try:
+        with open(favorites_file_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        favs = data.get("favorites", []) if isinstance(data, dict) else []
+        return [f for f in favs if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def save_local_favorites(paths: List[str]) -> None:
+    """Persist this computer's favourite folder paths."""
+    cleaned = sorted({os.path.normpath(p) for p in paths if p})
+    data = {"version": 1, "favorites": cleaned}
+    tmp = favorites_file_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, favorites_file_path())
+
+
+def add_local_favorite(path: str) -> bool:
+    """Add a favourite folder. Returns True when newly added."""
+    norm = os.path.normpath(path)
+    favs = load_local_favorites()
+    if norm in favs:
+        return False
+    favs.append(norm)
+    save_local_favorites(favs)
+    return True
+
+
+def remove_local_favorite(path: str) -> bool:
+    """Remove a favourite folder. Returns True when it was present."""
+    norm = os.path.normpath(path)
+    favs = load_local_favorites()
+    if norm not in favs:
+        return False
+    favs.remove(norm)
+    save_local_favorites(favs)
+    return True
+
+
+def read_remote_favorites(peer: "PeerConnection") -> List[str]:
+    """Read the other computer's favourite folders over SFTP (empty if none)."""
+    try:
+        remote_path = f"{peer.home_dir.rstrip('/')}/{FAVORITES_FILE_NAME}"
+        with peer.sftp.open(remote_path, "r") as fh:
+            data = json.load(fh)
+        favs = data.get("favorites", []) if isinstance(data, dict) else []
+        return [f for f in favs if isinstance(f, str)]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +594,7 @@ class PeerPlan:
     """One selected sync pair from the peer panel."""
 
     name: str
+    key: str = ""            # unique row key (path-based)
     local_path: str = ""
     remote_path: str = ""
     local_checked: bool = False
