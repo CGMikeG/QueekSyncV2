@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# QueekSync launcher for Linux / WSL (PyQt6 UI)
+# QueekSync launcher for Linux / WSL (PyQt6 UI).
+#
+# Bootstraps the app's own virtual environment on first run: creates .venv
+# (if missing), installs every dependency from requirements.txt (skipped when
+# nothing changed since the last run), then launches the app.
 set -e
 
 LOG="$HOME/.local/share/QueekSync/queeksync.log"
@@ -30,20 +34,37 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
 fi
 
-VENV="$SCRIPT_DIR/.venv"
+# ── Own virtual environment ──────────────────────────────────────────────────
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "[QueekSync] ERROR: python3 not found. Install Python 3.10+ and re-run." >&2
+    exit 1
+fi
 
-# ── Create venv if it doesn't exist ─────────────────────────────────────────
-if [ ! -f "$VENV/bin/python" ]; then
+VENV="$SCRIPT_DIR/.venv"
+VENV_PY="$VENV/bin/python"
+STAMP=".queeksync-requirements.sha256"
+
+if [ ! -f "$VENV_PY" ]; then
     echo "[QueekSync] Creating virtual environment..."
     python3 -m venv "$VENV"
 fi
 
-# ── Ensure PyQt6 is installed ───────────────────────────────────────────────
-if ! "$VENV/bin/python" -c "import PyQt6" >/dev/null 2>&1; then
-    echo "[QueekSync] Installing PyQt6..."
-    "$VENV/bin/python" -m pip install --quiet PyQt6
+if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+    echo "[QueekSync] Installing pip..."
+    "$VENV_PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+
+# Install all dependencies (requirements.txt) when needed; the stamp keeps
+# repeat launches fast. This is what guarantees paramiko/PyQt6/... exist.
+REQ_HASH="$(python3 -c "import hashlib;print(hashlib.sha256(open('requirements.txt','rb').read()).hexdigest())" 2>/dev/null || true)"
+if [ -f "$STAMP" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" = "$REQ_HASH" ]; then
+    :
+else
+    echo "[QueekSync] Installing dependencies into the app virtual environment..."
+    "$VENV_PY" -m pip install --quiet --upgrade -r requirements.txt
+    printf '%s\n' "$REQ_HASH" > "$STAMP"
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 echo "[QueekSync] Starting (PyQt6 UI)... (log: $LOG)"
-"$VENV/bin/python" main_qt.py "$@" 2>&1 | tee "$LOG"
+"$VENV_PY" main_qt.py "$@" 2>&1 | tee "$LOG"

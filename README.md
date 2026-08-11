@@ -95,6 +95,11 @@ chmod +x run_qt.sh
 # or: ./run.sh     # legacy customtkinter UI
 ```
 
+The launcher uses the app's own virtual environment (`.venv`): on a new
+computer it creates it and installs all dependencies automatically, so
+`./run_qt.sh` alone is enough to get started. `setup.sh` does the same thing
+up front and also verifies the app can start.
+
 What happens:
 
 1. Creates .venv on first run
