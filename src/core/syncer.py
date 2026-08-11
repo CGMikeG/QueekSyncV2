@@ -363,6 +363,7 @@ class SFTPFS:
         username: str,
         password: str = "",
         key_file: str = "",
+        sftp=None,
     ) -> None:
         self.host = host
         self.port = port
@@ -370,10 +371,13 @@ class SFTPFS:
         self.password = password
         self.key_file = key_file
         self._ssh = None
-        self._sftp = None
+        self._sftp = sftp            # optional externally-owned SFTP handle
+        self._owns_connection = sftp is None
 
     # ------------------------------------------------------------------
     def connect(self) -> None:
+        if self._sftp is not None:
+            return  # using an externally-provided SFTP handle
         import paramiko  # type: ignore[import]
 
         self._ssh = paramiko.SSHClient()
@@ -392,6 +396,11 @@ class SFTPFS:
         self._sftp = self._ssh.open_sftp()
 
     def disconnect(self) -> None:
+        if not self._owns_connection:
+            # never close a connection owned by the caller
+            self._sftp = None
+            self._ssh = None
+            return
         if self._sftp:
             try:
                 self._sftp.close()

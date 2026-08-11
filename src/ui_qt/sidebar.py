@@ -21,6 +21,7 @@ from ui_qt import theme as T
 
 NAV_ITEMS: List[Tuple[str, str, str]] = [
     ("dashboard", "◈  Dashboard", "Overview of all profiles and activity"),
+    ("peer",      "⇄  Peer Sync", "Sync folders between two computers over SSH"),
     ("profiles",  "☰  Profiles",  "Manage sync profiles"),
     ("monitor",   "◉  Monitor",   "Live sync progress and logs"),
     ("settings",  "⚙  Settings",  "Application preferences"),

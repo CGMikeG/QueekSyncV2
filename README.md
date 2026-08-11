@@ -27,6 +27,7 @@ Each sync profile stores source/destination endpoints, sync behavior, filters, a
 - File-change triggered sync for local source folders
 - Live monitor panel with progress and logs
 - SFTP connection testing and remote folder browser
+- Peer Sync: browse folders on two computers side by side over SSH, compare which side is newer, and sync selected folders
 
 ## Tech Stack
 
@@ -96,6 +97,23 @@ Notes:
 - If auto-install is not available for your distro, the launcher prints the manual package command to run
 
 ## How to Use
+
+### 0. Peer Sync (between two computers)
+
+If two computers both run QueekSync, you can sync folders between them over
+SSH using just the other computer's IP address and password:
+
+1. Open the **Peer Sync** page from the sidebar.
+2. Enter the other computer's IP (or hostname), SSH port, username, and password, then click **Connect**.
+3. Both computers' folders are shown side by side (defaults to the home folders; you can change the base folder on either side).
+4. Tick the folders you want to sync — folders present on both sides are paired by name, folders checked on only one side can be copied to the other.
+5. Click **Compare Selected** to see which side is newer for each folder (file counts, latest change, and a verdict: This PC newer / Other PC newer / In sync / Only on one side).
+6. Click **Sync Selected** to run the syncs. Shared folders sync two-way; one-sided folders are copied to the missing side. Progress appears in the Monitor panel.
+
+Each pair is saved as a profile (named `Peer: <folder>`), so it can be re-run
+or scheduled later; re-syncing the same pair reuses the existing profile
+instead of creating duplicates. Passwords are stored in the profile files in
+plaintext, matching the existing SFTP profile behaviour.
 
 ### 1. Create a Sync Profile
 

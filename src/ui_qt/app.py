@@ -35,6 +35,7 @@ from ui_qt.sidebar import Sidebar
 
 _PAGE_TITLES = {
     "dashboard": "Dashboard",
+    "peer":      "Peer Sync",
     "profiles":  "Profiles",
     "monitor":   "Monitor",
     "settings":  "Settings",
@@ -160,6 +161,9 @@ class QueekSyncApp(QMainWindow):
 
         if page_id == "dashboard":
             return DashboardPanel(self)
+        if page_id == "peer":
+            from ui_qt.peer_panel import PeerSyncPanel
+            return PeerSyncPanel(self)
         if page_id == "profiles":
             return ProfilesPanel(self)
         if page_id == "monitor":
@@ -198,6 +202,11 @@ class QueekSyncApp(QMainWindow):
         profile = self.profile_mgr.get(profile_id)
         if profile is None:
             return
+        self.start_profile_sync(profile, interactive=interactive)
+
+    def start_profile_sync(self, profile, interactive: bool = True) -> None:
+        """Start a sync for an in-memory Profile (may or may not be saved)."""
+        profile_id = profile.id
         if profile_id in self._engines and self._engines[profile_id].is_running():
             return
 
