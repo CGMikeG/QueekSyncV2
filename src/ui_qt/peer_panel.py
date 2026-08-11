@@ -269,19 +269,29 @@ class PeerSyncPanel(QWidget):
         browse_btn = GhostButton("Browse…", root_card, command=self._browse_local_root)
         browse_btn.setFixedSize(90, 34)
         roots_row.addWidget(browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        fav_btn = GhostButton("★  Favourite", root_card, command=self._toggle_favorite)
+        fav_btn.setFixedSize(100, 34)
+        roots_row.addWidget(fav_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        sync_btn = GhostButton("⇄  Sync List", root_card, command=self._toggle_sync_list)
+        sync_btn.setFixedSize(100, 34)
+        roots_row.addWidget(sync_btn, 0, Qt.AlignmentFlag.AlignBottom)
         self._remote_root = LabelledEntry("Other computer – base folder", placeholder="/home/user")
         roots_row.addWidget(self._remote_root, 1)
         refresh_btn = GhostButton("⟳ Refresh", root_card, command=self._reload_folders)
         refresh_btn.setFixedSize(100, 34)
         roots_row.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignBottom)
         root_layout.addLayout(roots_row)
+        attach_tooltip(fav_btn, "Add (or remove) the base folder shown above as a favourite. "
+                               "The other computer sees it when it connects.")
+        attach_tooltip(sync_btn, "Add (or remove) the base folder shown above to your sync list. "
+                                "The other computer can then sync it with one click.")
 
         lists_row = QHBoxLayout()
         lists_row.setSpacing(T.PAD_MD)
         self._local_list, self._local_header = self._make_folder_list(
-            "Folders on this computer  (★ favourite · ⇄ sync list)", lists_row, with_buttons=True)
+            "Folders on this computer  (★ favourite · ⇄ sync list)", lists_row)
         self._remote_list, self._remote_header = self._make_folder_list(
-            "Folders on the other computer  (★ favourite · ⇄ sync list)", lists_row, with_buttons=False)
+            "Folders on the other computer  (★ favourite · ⇄ sync list)", lists_row)
         root_layout.addLayout(lists_row, 1)
         host_layout.addWidget(root_card)
 
@@ -346,7 +356,7 @@ class PeerSyncPanel(QWidget):
         self._set_connected_ui(False)
         self._populate_connections()
 
-    def _make_folder_list(self, title: str, parent_layout: QHBoxLayout, with_buttons: bool) -> tuple:
+    def _make_folder_list(self, title: str, parent_layout: QHBoxLayout) -> tuple:
         col = QWidget()
         col_layout = QVBoxLayout(col)
         col_layout.setContentsMargins(0, 0, 0, 0)
@@ -356,22 +366,6 @@ class PeerSyncPanel(QWidget):
         header.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px; font-weight: 600;")
         header_row.addWidget(header)
         header_row.addStretch()
-        if with_buttons:
-            fav_btn = GhostButton("★  Favourite", col)
-            fav_btn.setFixedSize(100, 26)
-            fav_btn.clicked.connect(self._toggle_favorite)
-            header_row.addWidget(fav_btn)
-            self._fav_btn = fav_btn
-            attach_tooltip(fav_btn, "Add (or remove) the selected folder as a favourite. "
-                                   "Favourites are shared: the other computer sees them when it connects.")
-
-            sync_btn = GhostButton("⇄  Sync List", col)
-            sync_btn.setFixedSize(100, 26)
-            sync_btn.clicked.connect(self._toggle_sync_list)
-            header_row.addWidget(sync_btn)
-            self._sync_list_btn = sync_btn
-            attach_tooltip(sync_btn, "Add (or remove) the selected folder to your sync list. "
-                                    "The other computer downloads the list and can sync those folders in one click.")
         col_layout.addLayout(header_row)
 
         lst = QListWidget()
@@ -773,37 +767,30 @@ class PeerSyncPanel(QWidget):
         return list(plans.values())
 
     def _toggle_favorite(self) -> None:
-        item = self._local_list.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Favourites", "Select a folder in the list first.")
-            return
-        name = item.data(_R_NAME)
-        path = item.data(_R_PATH)
-        if not path:
-            return
-        if item.data(_R_KIND) == "fav":
+        """Add (or remove) the base folder shown above as a favourite."""
+        path = self._local_root_text()
+        name = os.path.basename(path.rstrip("/\\")) or path
+        norm = _norm(path)
+        items = [p for p in (self._favs.get("local") or [])]
+        if norm in [_norm(p) for p in items]:
             remove_local_favorite(path)
-            self._favs["local"] = [p for p in self._favs.get("local", []) if _norm(p) != _norm(path)]
+            self._favs["local"] = [p for p in items if _norm(p) != norm]
             self._status_lbl.setText(f"Removed '{name}' from favourites.")
         else:
             add_local_favorite(path)
-            favs = self._favs.get("local") or []
-            if _norm(path) not in [_norm(p) for p in favs]:
-                favs.append(path)
-            self._favs["local"] = favs
-            self._status_lbl.setText(f"Added '{name}' to favourites. The other computer will see it on connect.")
+            if norm not in [_norm(p) for p in items]:
+                items.append(path)
+            self._favs["local"] = items
+            self._status_lbl.setText(
+                f"Added '{name}' to favourites. The other computer will see it when it connects."
+            )
         self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
         self._render_lists()
 
     def _toggle_sync_list(self) -> None:
-        item = self._local_list.currentItem()
-        if item is None:
-            QMessageBox.information(self, "Sync List", "Select a folder in the list first.")
-            return
-        name = item.data(_R_NAME)
-        path = item.data(_R_PATH)
-        if not path:
-            return
+        """Add (or remove) the base folder shown above to the sync list."""
+        path = self._local_root_text()
+        name = os.path.basename(path.rstrip("/\\")) or path
         norm = _norm(path)
         items = [p for p in (self._sync_lists.get("local") or [])]
         if norm in [_norm(p) for p in items]:
