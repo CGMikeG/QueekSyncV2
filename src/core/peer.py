@@ -801,7 +801,15 @@ class PeerPlan:
             return "this PC → other PC"
         return "other PC → this PC"
 
-    def build_profile(self, local_root: str, remote_root: str, remote_cfg: EndpointConfig, host_label: str) -> Profile:
+    def build_profile(
+        self,
+        local_root: str,
+        remote_root: str,
+        remote_cfg: EndpointConfig,
+        host_label: str,
+        mode: Optional[str] = None,
+        direction: Optional[str] = None,
+    ) -> Profile:
         if self.local_checked:
             local_path = self.local_path or os.path.join(local_root, self.name)
         else:
@@ -810,12 +818,15 @@ class PeerPlan:
             remote_path = self.remote_path or f"{remote_root.rstrip('/')}/{self.name}"
         else:
             remote_path = f"{remote_root.rstrip('/')}/{self.name}"
-        direction = "remote_to_local" if self.remote_checked and not self.local_checked else "local_to_remote"
+        if mode is None:
+            mode = self.mode
+        if direction is None:
+            direction = "remote_to_local" if self.remote_checked and not self.local_checked else "local_to_remote"
         return build_peer_profile(
             self.name,
             local_path,
             remote_cfg,
-            mode=self.mode,
+            mode=mode,
             host_label=host_label,
             remote_path=remote_path,
             direction=direction,

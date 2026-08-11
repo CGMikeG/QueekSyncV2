@@ -126,6 +126,11 @@ SSH using just the other computer's IP address and password:
 5. Click **Compare Selected** to see which side is newer for each folder (file counts, latest change, and a verdict: This PC newer / Other PC newer / In sync / Only on one side).
 6. Click **Sync Selected** to run the syncs. Shared folders sync two-way; one-sided folders are copied to the missing side. Progress appears in the Monitor panel.
 
+**Sync direction**: the Peer Sync page has a direction selector - **Two-way
+(automatic)** (default: folders on both computers sync both ways, one-sided
+folders are copied across), **This PC → Other PC**, or **Other PC → This PC**
+(one-way copies always go that direction).
+
 **Favourites** (★) and **sync list** (⇄) work on the **base folder**: set
 "This computer – base folder" to the folder you want (or Browse to it), then
 click **★ Favourite** / **⇄ Sync List** next to it - no need to select a

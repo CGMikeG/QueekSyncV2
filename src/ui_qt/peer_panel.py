@@ -20,6 +20,7 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -326,6 +327,20 @@ class PeerSyncPanel(QWidget):
             f"QTableWidget::item:selected {{ background-color: {T.BG_HOVER}; }}"
         )
         plan_layout.addWidget(self._plan_table)
+
+        direction_row = QHBoxLayout()
+        direction_row.addWidget(MutedLabel("Sync direction"))
+        self._direction_combo = QComboBox()
+        self._direction_combo.addItem("Two-way (automatic)", "auto")
+        self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
+        self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
+        self._direction_combo.setMinimumWidth(220)
+        direction_row.addWidget(self._direction_combo)
+        direction_row.addStretch()
+        plan_layout.addLayout(direction_row)
+        attach_tooltip(self._direction_combo,
+                       "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
+                       "copied across. Pick a one-way direction to always copy that way instead.")
 
         plan_row = QHBoxLayout()
         self._copy_missing_cb = QCheckBox("Copy folders that exist on only one side")
@@ -913,6 +928,18 @@ class PeerSyncPanel(QWidget):
         host_label = f"{self._peer.username}@{self._peer.host}"
         copy_missing = self._copy_missing_cb.isChecked()
 
+        # Direction chosen in the panel: "auto" keeps the per-folder behaviour
+        # (two-way when both sides exist, otherwise towards the side that has
+        # the folder), one-way choices force that direction for every pair.
+        choice = self._direction_combo.currentData()
+        force_mode: Optional[str] = None
+        force_direction: Optional[str] = None
+        direction_label = ""
+        if choice == "local_to_remote":
+            force_mode, force_direction, direction_label = "one_way", "local_to_remote", "this PC → other PC"
+        elif choice == "remote_to_local":
+            force_mode, force_direction, direction_label = "one_way", "remote_to_local", "other PC → this PC"
+
         to_run: List[PeerPlan] = []
         skipped: List[str] = []
         for plan in plans:
@@ -931,7 +958,7 @@ class PeerSyncPanel(QWidget):
 
         lines = []
         for plan in to_run:
-            lines.append(f"- {plan.name}  →  {plan.direction}")
+            lines.append(f"- {plan.name}  →  {direction_label if direction_label else plan.direction}")
         if skipped:
             lines.append(f"\nSkipped (only on one side): {', '.join(skipped)}")
         prompt = "The following folders will be synced:\n\n" + "\n".join(lines)
@@ -945,7 +972,10 @@ class PeerSyncPanel(QWidget):
 
         started = 0
         for plan in to_run:
-            profile = plan.build_profile(local_root, remote_root, remote_cfg, host_label)
+            profile = plan.build_profile(
+                local_root, remote_root, remote_cfg, host_label,
+                mode=force_mode, direction=force_direction,
+            )
             profile = find_or_create_peer_profile(self._app.profile_mgr, profile)
             self._app.save_profile(profile)
             self._app.start_sync(profile.id)
