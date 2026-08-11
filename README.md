@@ -126,6 +126,16 @@ SSH using just the other computer's IP address and password:
 5. Click **Compare Selected** to see which side is newer for each folder (file counts, latest change, and a verdict: This PC newer / Other PC newer / In sync / Only on one side).
 6. Click **Sync Selected** to run the syncs. Shared folders sync two-way; one-sided folders are copied to the missing side. Progress appears in the Monitor panel.
 
+**Favourites** (★) pin folders to the top of the list on each computer.
+
+**Sync list** (⇄): each computer can publish a list of folders it wants
+synced - select a folder and click **⇄ Sync List** on this computer's list.
+The list is stored in the home folder (`.queeksync-sync-list.json`) and the
+other computer downloads it automatically when it connects. Click **⇄ Sync
+Remote List** to download the other computer's list and sync every folder on
+it in one click (folders that exist on both computers sync two-way, one-sided
+folders are copied across).
+
 Each pair is saved as a profile (named `Peer: <folder>`), so it can be re-run
 or scheduled later; re-syncing the same pair reuses the existing profile
 instead of creating duplicates. Passwords are stored in the profile files in

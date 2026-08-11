@@ -78,6 +78,77 @@ def remove_local_favorite(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Peer sync list
+# ---------------------------------------------------------------------------
+
+# Name of the sync-list file each computer keeps in its home directory.
+# The other computer downloads it over SFTP and can sync those folders with
+# one click - like favourites, but as "please sync these folders" instead
+# of "pin these folders".
+SYNC_LIST_FILE_NAME = ".queeksync-sync-list.json"
+
+
+def sync_list_path() -> str:
+    """Absolute path of this computer's sync-list file."""
+    return os.path.join(os.path.expanduser("~"), SYNC_LIST_FILE_NAME)
+
+
+def load_local_sync_list() -> List[str]:
+    """Load this computer's sync-list folder paths (may be empty)."""
+    try:
+        with open(sync_list_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        folders = data.get("folders", []) if isinstance(data, dict) else []
+        return [f for f in folders if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+def save_local_sync_list(paths: List[str]) -> None:
+    """Persist this computer's sync-list folder paths."""
+    cleaned = sorted({os.path.normpath(p) for p in paths if p})
+    data = {"version": 1, "folders": cleaned}
+    tmp = sync_list_path() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, sync_list_path())
+
+
+def add_to_sync_list(path: str) -> bool:
+    """Add a folder to the sync list. Returns True when newly added."""
+    norm = os.path.normpath(path)
+    items = load_local_sync_list()
+    if norm in items:
+        return False
+    items.append(norm)
+    save_local_sync_list(items)
+    return True
+
+
+def remove_from_sync_list(path: str) -> bool:
+    """Remove a folder from the sync list. Returns True when it was present."""
+    norm = os.path.normpath(path)
+    items = load_local_sync_list()
+    if norm not in items:
+        return False
+    items.remove(norm)
+    save_local_sync_list(items)
+    return True
+
+
+def read_remote_sync_list(peer: "PeerConnection") -> List[str]:
+    """Read the other computer's sync-list folders over SFTP (empty if none)."""
+    try:
+        remote_path = f"{peer.home_dir.rstrip('/')}/{SYNC_LIST_FILE_NAME}"
+        with peer.sftp.open(remote_path, "r") as fh:
+            data = json.load(fh)
+        folders = data.get("folders", []) if isinstance(data, dict) else []
+        return [f for f in folders if isinstance(f, str)]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Saved peer connections
 # ---------------------------------------------------------------------------
 

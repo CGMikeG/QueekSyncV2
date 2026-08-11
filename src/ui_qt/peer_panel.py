@@ -4,7 +4,8 @@ Peer Sync panel – sync folders between two computers over SSH (PyQt6).
 
 Flow:
   1. Connect to the other computer (IP, username, password).
-  2. Favourite folders on either machine are pinned to the top of the lists.
+  2. Favourite and sync-list folders on either machine are pinned to the top
+     of the lists; the other computer's sync list can be synced in one click.
   3. Tick folders to sync, Compare to see which side is newer, Sync to run.
 """
 
@@ -38,14 +39,18 @@ from core.peer import (
     PeerConnectionConfig,
     PeerPlan,
     add_local_favorite,
+    add_to_sync_list,
     compare_pair,
     delete_peer_connection,
     find_or_create_peer_profile,
     list_local_folders,
     load_local_favorites,
+    load_local_sync_list,
     load_peer_connections,
     read_remote_favorites,
+    read_remote_sync_list,
     remove_local_favorite,
+    remove_from_sync_list,
     save_peer_connections,
     touch_peer_connection,
     upsert_peer_connection,
@@ -91,7 +96,7 @@ _VERDICT_COLORS = {
 _R_KEY   = Qt.ItemDataRole.UserRole      # unique key
 _R_NAME  = Qt.ItemDataRole.UserRole + 1  # display name (basename)
 _R_MTIME = Qt.ItemDataRole.UserRole + 2  # last-modified time
-_R_KIND  = Qt.ItemDataRole.UserRole + 3  # "dir" | "fav"
+_R_KIND  = Qt.ItemDataRole.UserRole + 3  # "dir" | "fav" | "sync"
 _R_PATH  = Qt.ItemDataRole.UserRole + 4  # absolute path
 _R_CONN  = Qt.ItemDataRole.UserRole + 5  # saved connection name
 
@@ -102,6 +107,7 @@ class _PeerSignals(QObject):
     connected = pyqtSignal(bool, str)            # ok, message
     folders_loaded = pyqtSignal(str, list)       # side, entries
     favorites_loaded = pyqtSignal(str, list)     # side, favourite paths
+    sync_list_loaded = pyqtSignal(str, list)     # side, sync-list paths
     compare_row = pyqtSignal(str, str, str)      # key, side, status
     pair_compared = pyqtSignal(str, object)      # key, PairCompare
     sync_done = pyqtSignal(bool, str)
@@ -138,11 +144,13 @@ class PeerSyncPanel(QWidget):
         # loaded state per side; None = not loaded yet
         self._folders: Dict[str, Optional[List[dict]]] = {"local": None, "remote": None}
         self._favs: Dict[str, Optional[List[str]]] = {"local": None, "remote": None}
+        self._sync_lists: Dict[str, Optional[List[str]]] = {"local": None, "remote": None}
         self._checked: Dict[str, bool] = {}
 
         self._signals.connected.connect(self._on_connected)
         self._signals.folders_loaded.connect(self._on_folders_loaded)
         self._signals.favorites_loaded.connect(self._on_favorites_loaded)
+        self._signals.sync_list_loaded.connect(self._on_sync_list_loaded)
         self._signals.compare_row.connect(self._on_compare_row)
         self._signals.pair_compared.connect(self._on_pair_compared)
         self._signals.sync_done.connect(self._on_sync_done)
@@ -271,9 +279,9 @@ class PeerSyncPanel(QWidget):
         lists_row = QHBoxLayout()
         lists_row.setSpacing(T.PAD_MD)
         self._local_list, self._local_header = self._make_folder_list(
-            "Folders on this computer  (★ = favourite)", lists_row, with_fav_btn=True)
+            "Folders on this computer  (★ favourite · ⇄ sync list)", lists_row, with_buttons=True)
         self._remote_list, self._remote_header = self._make_folder_list(
-            "Folders on the other computer  (★ = favourite)", lists_row, with_fav_btn=False)
+            "Folders on the other computer  (★ favourite · ⇄ sync list)", lists_row, with_buttons=False)
         root_layout.addLayout(lists_row, 1)
         host_layout.addWidget(root_card)
 
@@ -318,6 +326,8 @@ class PeerSyncPanel(QWidget):
         plan_row.addWidget(compare_btn)
         self._fav_sync_btn = GhostButton("★  Sync Favourites", plan_card, command=self._sync_favorites)
         plan_row.addWidget(self._fav_sync_btn)
+        self._sync_remote_btn = GhostButton("⇄  Sync Remote List", plan_card, command=self._sync_remote_list)
+        plan_row.addWidget(self._sync_remote_btn)
         self._sync_btn = PrimaryButton("▶  Sync Selected", plan_card, command=self._sync_selected)
         plan_row.addWidget(self._sync_btn)
         plan_layout.addLayout(plan_row)
@@ -330,12 +340,13 @@ class PeerSyncPanel(QWidget):
         attach_tooltip(compare_btn, "Scan the selected folders on both computers and show which side is newer.")
         attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
         attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
+        attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
         attach_tooltip(self._copy_missing_cb, "Folders checked on one side only are copied to the other side.")
 
         self._set_connected_ui(False)
         self._populate_connections()
 
-    def _make_folder_list(self, title: str, parent_layout: QHBoxLayout, with_fav_btn: bool) -> tuple:
+    def _make_folder_list(self, title: str, parent_layout: QHBoxLayout, with_buttons: bool) -> tuple:
         col = QWidget()
         col_layout = QVBoxLayout(col)
         col_layout.setContentsMargins(0, 0, 0, 0)
@@ -345,7 +356,7 @@ class PeerSyncPanel(QWidget):
         header.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px; font-weight: 600;")
         header_row.addWidget(header)
         header_row.addStretch()
-        if with_fav_btn:
+        if with_buttons:
             fav_btn = GhostButton("★  Favourite", col)
             fav_btn.setFixedSize(100, 26)
             fav_btn.clicked.connect(self._toggle_favorite)
@@ -353,6 +364,14 @@ class PeerSyncPanel(QWidget):
             self._fav_btn = fav_btn
             attach_tooltip(fav_btn, "Add (or remove) the selected folder as a favourite. "
                                    "Favourites are shared: the other computer sees them when it connects.")
+
+            sync_btn = GhostButton("⇄  Sync List", col)
+            sync_btn.setFixedSize(100, 26)
+            sync_btn.clicked.connect(self._toggle_sync_list)
+            header_row.addWidget(sync_btn)
+            self._sync_list_btn = sync_btn
+            attach_tooltip(sync_btn, "Add (or remove) the selected folder to your sync list. "
+                                    "The other computer downloads the list and can sync those folders in one click.")
         col_layout.addLayout(header_row)
 
         lst = QListWidget()
@@ -521,7 +540,7 @@ class PeerSyncPanel(QWidget):
 
         self._set_connected_ui(True)
         label = f"{self._peer.username}@{self._peer.host}:{self._peer.port}"
-        self._remote_header.setText(f"Folders on the other computer ({label})  (★ = favourite)")
+        self._remote_header.setText(f"Folders on the other computer ({label})  (★ favourite · ⇄ sync list)")
         self._remote_root.set(message)
         self._conn_detail.setText(f"Connected · home: {message}")
         self._status_lbl.setText(f"Connected to {label}.")
@@ -548,11 +567,12 @@ class PeerSyncPanel(QWidget):
         self._set_connected_ui(False)
         self._folders = {"local": None, "remote": None}
         self._favs = {"local": None, "remote": None}
+        self._sync_lists = {"local": None, "remote": None}
         self._checked = {}
         self._local_list.clear()
         self._remote_list.clear()
         self._plan_table.setRowCount(0)
-        self._remote_header.setText("Folders on the other computer  (★ = favourite)")
+        self._remote_header.setText("Folders on the other computer  (★ favourite · ⇄ sync list)")
         self._conn_detail.setText("")
         self._status_lbl.setText("Disconnected. Enter the other computer's details to reconnect.")
         self._status_lbl.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px;")
@@ -561,6 +581,7 @@ class PeerSyncPanel(QWidget):
         self._disconnect_btn.setEnabled(connected)
         self._sync_btn.setEnabled(connected)
         self._fav_sync_btn.setEnabled(connected)
+        self._sync_remote_btn.setEnabled(connected)
 
     # ==================================================================
     # Folder listing + favourites
@@ -591,6 +612,7 @@ class PeerSyncPanel(QWidget):
         self._checked = {}
         self._folders = {"local": None, "remote": None}
         self._favs = {"local": None, "remote": None}
+        self._sync_lists = {"local": None, "remote": None}
         self._plan_table.setRowCount(0)
 
         self._status_lbl.setText("Listing folders …")
@@ -605,18 +627,22 @@ class PeerSyncPanel(QWidget):
                 local_err = str(exc)
             self._signals.folders_loaded.emit("local", local_folders if not local_err else [])
             self._signals.favorites_loaded.emit("local", load_local_favorites())
+            self._signals.sync_list_loaded.emit("local", load_local_sync_list())
 
             remote_err = ""
             remote_folders: List[dict] = []
             remote_favs: List[str] = []
+            remote_sync: List[str] = []
             if self._peer is not None:
                 try:
                     remote_folders = self._peer.list_folders(remote_path)
                 except Exception as exc:
                     remote_err = str(exc)
                 remote_favs = read_remote_favorites(self._peer)
+                remote_sync = read_remote_sync_list(self._peer)
             self._signals.folders_loaded.emit("remote", remote_folders if not remote_err else [])
             self._signals.favorites_loaded.emit("remote", remote_favs)
+            self._signals.sync_list_loaded.emit("remote", remote_sync)
 
             if local_err or remote_err:
                 self._signals.sync_done.emit(False, (f"Could not list folders:\n"
@@ -632,18 +658,26 @@ class PeerSyncPanel(QWidget):
         self._favs[side] = [_norm(p) for p in favs]
         self._maybe_render()
 
+    def _on_sync_list_loaded(self, side: str, paths: List[str]) -> None:
+        self._sync_lists[side] = [_norm(p) for p in paths]
+        self._maybe_render()
+
     def _maybe_render(self) -> None:
         if (
             self._folders["local"] is None or self._folders["remote"] is None
             or self._favs["local"] is None or self._favs["remote"] is None
+            or self._sync_lists["local"] is None or self._sync_lists["remote"] is None
         ):
             return
         self._render_lists()
         n_local = len(self._favs["local"])
         n_remote = len(self._favs["remote"])
+        n_local_sync = len(self._sync_lists["local"])
+        n_remote_sync = len(self._sync_lists["remote"])
         self._status_lbl.setText(
             f"Loaded folders on both computers. "
-            f"Favourites: {n_local} on this PC, {n_remote} on the other PC."
+            f"Favourites: {n_local} on this PC, {n_remote} on the other PC. "
+            f"Sync lists: {n_local_sync} on this PC, {n_remote_sync} on the other PC."
         )
         self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
         self._plan_status.setText("Tick folders on either side, then Compare or Sync.")
@@ -657,6 +691,7 @@ class PeerSyncPanel(QWidget):
     def _render_list(self, lst: QListWidget, side: str) -> None:
         root = self._local_root_text() if side == "local" else self._remote_root_text()
         favs = self._favs.get(side) or []
+        syncs = self._sync_lists.get(side) or []
         folders = self._folders.get(side) or []
 
         rows: List[Tuple[str, str, float, str, str]] = []  # key, name, mtime, kind, path
@@ -664,17 +699,26 @@ class PeerSyncPanel(QWidget):
             name = os.path.basename(p.rstrip("/\\")) or p
             rows.append((f"fav:{p}", name, 0.0, "fav", p))
         fav_norm = {_norm(p) for p in favs}
+        for p in syncs:
+            name = os.path.basename(p.rstrip("/\\")) or p
+            rows.append((f"sync:{p}", name, 0.0, "sync", p))
+        sync_norm = {_norm(p) for p in syncs}
         for f in folders:
             name = f["name"]
             path = os.path.join(root, name)
-            if _norm(path) in fav_norm:
-                continue  # already shown as a favourite row
+            if _norm(path) in fav_norm or _norm(path) in sync_norm:
+                continue  # already shown as a favourite / sync-list row
             rows.append((f"dir:{_norm(path)}", name, f["mtime"], "dir", path))
 
         lst.blockSignals(True)
         lst.clear()
         for key, name, mtime, kind, path in rows:
-            text = f"★ {name}" if kind == "fav" else f"{name}   ·   {_fmt_mtime(mtime)}"
+            if kind == "fav":
+                text = f"★ {name}"
+            elif kind == "sync":
+                text = f"⇄ {name}"
+            else:
+                text = f"{name}   ·   {_fmt_mtime(mtime)}"
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if self._checked.get(key, False) else Qt.CheckState.Unchecked)
@@ -686,6 +730,9 @@ class PeerSyncPanel(QWidget):
             if kind == "fav":
                 item.setForeground(QColor(T.WARNING))
                 item.setToolTip(path)
+            elif kind == "sync":
+                item.setForeground(QColor(T.ACCENT2))
+                item.setToolTip(path + "\nOn the other computer's sync list.")
             lst.addItem(item)
         lst.blockSignals(False)
 
@@ -745,6 +792,32 @@ class PeerSyncPanel(QWidget):
                 favs.append(path)
             self._favs["local"] = favs
             self._status_lbl.setText(f"Added '{name}' to favourites. The other computer will see it on connect.")
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._render_lists()
+
+    def _toggle_sync_list(self) -> None:
+        item = self._local_list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "Sync List", "Select a folder in the list first.")
+            return
+        name = item.data(_R_NAME)
+        path = item.data(_R_PATH)
+        if not path:
+            return
+        norm = _norm(path)
+        items = [p for p in (self._sync_lists.get("local") or [])]
+        if norm in [_norm(p) for p in items]:
+            remove_from_sync_list(path)
+            self._sync_lists["local"] = [p for p in items if _norm(p) != norm]
+            self._status_lbl.setText(f"Removed '{name}' from the sync list.")
+        else:
+            add_to_sync_list(path)
+            if norm not in [_norm(p) for p in items]:
+                items.append(path)
+            self._sync_lists["local"] = items
+            self._status_lbl.setText(
+                f"Added '{name}' to the sync list. The other computer can sync it with one click."
+            )
         self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
         self._render_lists()
 
@@ -813,6 +886,29 @@ class PeerSyncPanel(QWidget):
             for i in range(lst.count()):
                 item = lst.item(i)
                 if item.data(_R_KIND) == "fav":
+                    item.setCheckState(Qt.CheckState.Checked)
+        self._sync_selected()
+
+    def _sync_remote_list(self) -> None:
+        """Download the other computer's sync list and sync those folders.
+
+        Ticks every remote folder that is on the other computer's sync list,
+        plus any local folder with the same name (so pairs sync two-way),
+        then runs the sync.
+        """
+        remote_sync = self._sync_lists.get("remote") or []
+        if not remote_sync:
+            QMessageBox.information(
+                self, "Sync Remote List",
+                "The other computer has not published a sync list yet.\n\n"
+                "On the other computer, select folders and use the '⇄ Sync List' "
+                "button to add them, then connect again.")
+            return
+        remote_names = {os.path.basename(p.rstrip("/\\")) or p for p in remote_sync}
+        for lst in (self._remote_list, self._local_list):
+            for i in range(lst.count()):
+                item = lst.item(i)
+                if item.data(_R_NAME) in remote_names:
                     item.setCheckState(Qt.CheckState.Checked)
         self._sync_selected()
 
