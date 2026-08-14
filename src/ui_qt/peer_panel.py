@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QTableWidget,
     QTableWidgetItem,
@@ -52,6 +53,7 @@ from core.peer import (
     read_remote_sync_list,
     remove_local_favorite,
     remove_from_sync_list,
+    save_local_favorites,
     save_peer_connections,
     touch_peer_connection,
     upsert_peer_connection,
@@ -395,6 +397,9 @@ class PeerSyncPanel(QWidget):
         lst.setMinimumHeight(220)
         lst.setMaximumHeight(320)
         lst.itemChanged.connect(self._on_item_changed)
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lst.customContextMenuRequested.connect(self._on_list_context_menu)
+        attach_tooltip(lst, "Right-click a ★ favourite folder to remove it from favourites.")
         lst.setStyleSheet(
             f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; padding: 4px; }}"
@@ -827,6 +832,57 @@ class PeerSyncPanel(QWidget):
             self._status_lbl.setText(
                 f"Added '{name}' to the sync list. The other computer can sync it with one click."
             )
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._render_lists()
+
+    def _on_list_context_menu(self, pos) -> None:
+        """Right-click menu on a folder row: remove a favourite folder."""
+        lst = self.sender()
+        if not isinstance(lst, QListWidget) or (lst is not self._local_list and lst is not self._remote_list):
+            return
+        item = lst.itemAt(pos)
+        if item is None:
+            return
+        kind = item.data(_R_KIND)
+        if kind != "fav":
+            return
+        path = item.data(_R_PATH)
+        name = item.data(_R_NAME)
+
+        menu = QMenu(self)
+        if lst is self._local_list:
+            act = menu.addAction("★  Remove from favourites")
+            assert act is not None
+            act.triggered.connect(lambda: self._remove_favorite(path, name))
+        else:
+            act = menu.addAction("Managed on the other computer")
+            assert act is not None
+            act.setEnabled(False)
+            act.setToolTip("This is the other computer's favourites list. Remove folders there "
+                           "on that computer's Peer Sync page.")
+        menu.exec(lst.viewport().mapToGlobal(pos))
+
+    def _remove_favorite(self, path: str, name: str) -> None:
+        """Remove a favourite folder from this computer's favourites list."""
+        norm = _norm(path)
+        if QMessageBox.question(
+            self, "Remove Favourite",
+            f"Remove '{name}' from favourites?\n\n{path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        remove_local_favorite(path)
+        items = [p for p in (self._favs.get("local") or []) if _norm(p) != norm]
+        if not items:
+            # Keep the file in step with the panel even if they had drifted
+            # (e.g. the favourites file was missing or edited externally),
+            # so a removed row can never reappear on the next reload.
+            save_local_favorites([])
+        self._favs["local"] = items
+        for key in [k for k in self._checked if k.startswith("fav:") and _norm(k[4:]) == norm]:
+            self._checked.pop(key, None)
+        self._status_lbl.setText(f"Removed '{name}' from favourites.")
         self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
         self._render_lists()
 
