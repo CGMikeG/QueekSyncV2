@@ -618,6 +618,33 @@ class PairCompare:
             parts.append(f"{self.only_remote_files} only on other PC")
         return "  ·  ".join(parts)
 
+    @property
+    def newest_side(self) -> str:
+        """Which side holds the most recently modified file.
+
+        "local" / "remote" when that side's newest file is more than 2s
+        newer (same heuristic as the per-file diff), "tie" when both
+        sides have the same newest mtime, "none" when either side is
+        missing, errored, or has no files. This answers "which side has
+        the latest update" even when the per-file counts tie (mixed).
+        """
+        if self.local.error or self.remote.error:
+            return "none"
+        if self.local.missing or self.remote.missing:
+            return "none"
+        if self.local.latest_mtime <= 0 and self.remote.latest_mtime <= 0:
+            return "none"
+        if self.local.latest_mtime > self.remote.latest_mtime + 2:
+            return "local"
+        if self.remote.latest_mtime > self.local.latest_mtime + 2:
+            return "remote"
+        return "tie"
+
+    @property
+    def newest_mtime(self) -> float:
+        """The single most recent file modification time across both sides."""
+        return max(self.local.latest_mtime, self.remote.latest_mtime)
+
 
 def compare_folders(name: str, local: FolderScan, remote: FolderScan) -> PairCompare:
     """Compare two already-scanned folders file by file.

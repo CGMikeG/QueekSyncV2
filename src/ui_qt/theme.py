@@ -232,6 +232,26 @@ def build_qss(light: bool = False) -> str:
         font-size: 13px;
     }}
     QPushButton#IconButton:hover {{ background-color: {bg_hover}; color: {text}; }}
+    /* ── Context menus ──────────────────────────────────── */
+    QMenu {{
+        background-color: {bg_card};
+        border: 1px solid {border};
+        border-radius: {RADIUS_MD}px;
+        padding: 6px;
+    }}
+    QMenu::item {{
+        background: transparent;
+        color: {text};
+        padding: 7px 14px;
+        border-radius: {RADIUS_SM}px;
+    }}
+    QMenu::item:selected {{ background-color: {bg_hover}; }}
+    QMenu::item:disabled {{ color: {dim}; }}
+    QMenu::separator {{
+        height: 1px;
+        background: {border};
+        margin: 4px 8px;
+    }}
     /* ── Cards ───────────────────────────────────────────── */
     QFrame#GlassCard {{
         background-color: {bg_card};

@@ -310,6 +310,12 @@ class PeerSyncPanel(QWidget):
             ["Folder", "This PC", "Other PC", "Newer side", "Action"]
         )
         self._plan_table.verticalHeader().setVisible(False)
+        # Rows must grow to fit multi-line cells (e.g. "…\nLast updated: …");
+        # the default Interactive mode keeps every row at 30px and clips the
+        # second line, hiding the dates/times.
+        _vh = self._plan_table.verticalHeader()
+        assert _vh is not None
+        _vh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._plan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._plan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         header = self._plan_table.horizontalHeader()
@@ -371,7 +377,7 @@ class PeerSyncPanel(QWidget):
         host_layout.addWidget(plan_card)
         host_layout.addStretch()
 
-        attach_tooltip(compare_btn, "Scan the selected folders on both computers and show which side is newer.")
+        attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
         attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
         attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
         attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
@@ -851,10 +857,25 @@ class PeerSyncPanel(QWidget):
 
         menu = QMenu(self)
         if lst is self._local_list:
+            # Destructive action → follow the app's DangerButton look
+            # (red on dark red) instead of the default washed-out menu text.
+            menu.setStyleSheet(
+                f"QMenu {{ background-color: {T.BG_CARD}; border: 1px solid {T.BORDER};"
+                f" border-radius: {T.RADIUS_MD}px; padding: 6px; }}"
+                f"QMenu::item {{ background: transparent; color: {T.ERROR};"
+                f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
+                f"QMenu::item:selected {{ background-color: #7f1d1d; }}"
+            )
             act = menu.addAction("★  Remove from favourites")
             assert act is not None
             act.triggered.connect(lambda: self._remove_favorite(path, name))
         else:
+            menu.setStyleSheet(
+                f"QMenu {{ background-color: {T.BG_CARD}; border: 1px solid {T.BORDER};"
+                f" border-radius: {T.RADIUS_MD}px; padding: 6px; }}"
+                f"QMenu::item {{ background: transparent; color: {T.TEXT_DIM};"
+                f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
+            )
             act = menu.addAction("Managed on the other computer")
             assert act is not None
             act.setEnabled(False)
@@ -930,15 +951,35 @@ class PeerSyncPanel(QWidget):
         if row is None:
             return
         local_txt = cmp.local.summary_line() if (cmp.local.error or cmp.local.missing) else (
-            f"{cmp.local.file_count} file(s) · {_human_size(cmp.local.total_size)}\nlatest {_fmt_mtime(cmp.local.latest_mtime)}"
+            f"{cmp.local.file_count} file(s) · {_human_size(cmp.local.total_size)}\n"
+            f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}"
         )
         remote_txt = cmp.remote.summary_line() if (cmp.remote.error or cmp.remote.missing) else (
-            f"{cmp.remote.file_count} file(s) · {_human_size(cmp.remote.total_size)}\nlatest {_fmt_mtime(cmp.remote.latest_mtime)}"
+            f"{cmp.remote.file_count} file(s) · {_human_size(cmp.remote.total_size)}\n"
+            f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
         )
         self._set_cell(row, 1, local_txt)
         self._set_cell(row, 2, remote_txt)
-        self._set_verdict_cell(row, 3, _VERDICT_LABELS.get(cmp.verdict, cmp.verdict),
-                               _VERDICT_COLORS.get(cmp.verdict, T.TEXT))
+        verdict_txt = _VERDICT_LABELS.get(cmp.verdict, cmp.verdict)
+        verdict_color = _VERDICT_COLORS.get(cmp.verdict, T.TEXT)
+        # Always report the date/time the folder content was last updated,
+        # and which side holds it when that is meaningful.
+        when = _fmt_mtime(cmp.newest_mtime)
+        newest_side = cmp.newest_side
+        if newest_side == "local" and cmp.newest_mtime:
+            verdict_txt += f"\nLast updated: this PC · {when}"
+            verdict_color = T.ACCENT
+        elif newest_side == "remote" and cmp.newest_mtime:
+            verdict_txt += f"\nLast updated: other PC · {when}"
+            verdict_color = T.ACCENT2
+        elif newest_side == "tie" and cmp.newest_mtime:
+            # Both sides updated within 2s of each other — one shared time.
+            verdict_txt += f"\nLast updated: {when}"
+        elif cmp.verdict == "only_local" and cmp.local.latest_mtime:
+            verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.local.latest_mtime)}"
+        elif cmp.verdict == "only_remote" and cmp.remote.latest_mtime:
+            verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
+        self._set_verdict_cell(row, 3, verdict_txt, verdict_color)
         self._set_cell(row, 4, cmp.sync_action)
 
     # ==================================================================
