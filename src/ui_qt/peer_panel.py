@@ -21,10 +21,12 @@ from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QMenu,
@@ -113,6 +115,7 @@ class _PeerSignals(QObject):
     sync_list_loaded = pyqtSignal(str, list)     # side, sync-list paths
     compare_row = pyqtSignal(str, str, str)      # key, side, status
     pair_compared = pyqtSignal(str, object)      # key, PairCompare
+    safety_checked = pyqtSignal(list, object)    # [(PeerPlan, PairCompare)], ctx dict
     sync_done = pyqtSignal(bool, str)
 
 
@@ -132,6 +135,119 @@ def _human_size(num: int) -> str:
 
 def _norm(p: str) -> str:
     return os.path.normpath(p)
+
+
+class SyncSafetyDialog(QDialog):
+    """Pre-sync safety check: shows what each folder holds (file counts,
+    sizes, content types, latest update) plus the differences between the
+    two sides, and asks the user to confirm before the sync proceeds."""
+
+    def __init__(self, parent, results, ctx) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Check folders before syncing")
+        self.setModal(True)
+        self.resize(680, 560)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(T.PAD_LG, T.PAD_LG, T.PAD_LG, T.PAD_LG)
+        root.setSpacing(T.PAD_MD)
+
+        title = QLabel("Check folders before syncing")
+        title.setStyleSheet(f"color: {T.TEXT}; font-size: 17px; font-weight: 700;")
+        root.addWidget(title)
+
+        subtitle = MutedLabel(
+            "These folders don't match exactly. Review what each side holds, "
+            "then decide whether to sync them anyway."
+        )
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        scroll = ScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setMaximumHeight(380)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(2, 2, 2, 2)
+        inner_layout.setSpacing(T.PAD_SM)
+        for plan, cmp in results:
+            inner_layout.addWidget(self._build_section(plan, cmp))
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        root.addWidget(scroll, 1)
+
+        extra = self._extra_text(ctx)
+        if extra:
+            extra_lbl = MutedLabel(extra)
+            extra_lbl.setWordWrap(True)
+            root.addWidget(extra_lbl)
+
+        btn_row = QHBoxLayout()
+        cancel_btn = GhostButton("Cancel", self, command=self.reject)
+        cancel_btn.setDefault(True)
+        sync_btn = PrimaryButton("▶  Sync anyway", self, command=self.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(sync_btn)
+        root.addLayout(btn_row)
+
+    # ------------------------------------------------------------------
+
+    def _build_section(self, plan, cmp) -> GlassCard:
+        card = GlassCard(self)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
+        lay.setSpacing(6)
+
+        head = QLabel(f"📁 {plan.name}")
+        head.setStyleSheet(f"color: {T.TEXT}; font-size: 14px; font-weight: 700;")
+        lay.addWidget(head)
+
+        for side_lbl, scan in (("This PC", cmp.local), ("Other PC", cmp.remote)):
+            lay.addWidget(self._side_label(side_lbl, scan))
+
+        diffs = cmp.difference_lines()
+        if diffs:
+            for line in diffs:
+                warn = QLabel(f"⚠  {line}")
+                warn.setStyleSheet(f"color: {T.WARNING}; font-size: 12px;")
+                warn.setWordWrap(True)
+                lay.addWidget(warn)
+        else:
+            ok = QLabel("✓  Folders match on both sides")
+            ok.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
+            lay.addWidget(ok)
+        return card
+
+    def _side_label(self, side_lbl: str, scan) -> QLabel:
+        if scan.missing:
+            txt, color = f"{side_lbl}:  not present", T.WARNING
+        elif scan.error:
+            txt, color = f"{side_lbl}:  error: {scan.error}", T.ERROR
+        else:
+            txt = (
+                f"{side_lbl}:  {scan.path}\n"
+                f"    {scan.file_count} file(s) · {_human_size(scan.total_size)}"
+                f" · last updated {_fmt_mtime(scan.latest_mtime)}\n"
+                f"    contents: {scan.content_summary()}"
+            )
+            color = T.TEXT
+        lbl = QLabel(txt)
+        lbl.setStyleSheet(f"color: {color}; font-size: 12px;")
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _extra_text(self, ctx) -> str:
+        parts = []
+        direction_label = ctx.get("direction_label", "")
+        if direction_label:
+            parts.append(f"Direction: {direction_label}")
+        if ctx.get("delete_extra"):
+            parts.append("Extra files at the destination will be deleted (mirror).")
+        skipped = ctx.get("skipped") or []
+        if skipped:
+            parts.append(f"Skipped (only on one side): {', '.join(skipped)}")
+        return "  ·  ".join(parts)
 
 
 class PeerSyncPanel(QWidget):
@@ -156,6 +272,7 @@ class PeerSyncPanel(QWidget):
         self._signals.sync_list_loaded.connect(self._on_sync_list_loaded)
         self._signals.compare_row.connect(self._on_compare_row)
         self._signals.pair_compared.connect(self._on_pair_compared)
+        self._signals.safety_checked.connect(self._on_safety_checked)
         self._signals.sync_done.connect(self._on_sync_done)
 
         self._build()
@@ -1023,6 +1140,8 @@ class PeerSyncPanel(QWidget):
         self._delete_extra_cb.setEnabled(self._direction_combo.currentData() != "auto")
 
     def _sync_selected(self) -> None:
+        if getattr(self, "_sync_checking", False):
+            return
         plans = self._selected_plans()
         if not plans:
             QMessageBox.information(self, "Sync", "Tick at least one folder on either side first.")
@@ -1066,35 +1185,83 @@ class PeerSyncPanel(QWidget):
 
         delete_extra = force_mode == "one_way" and self._delete_extra_cb.isChecked()
 
-        lines = []
-        for plan in to_run:
-            lines.append(f"- {plan.name}  →  {direction_label if direction_label else plan.direction}")
-        if delete_extra:
-            lines.append("\nExtra files at the destination will be deleted (mirror).")
-        if skipped:
-            lines.append(f"\nSkipped (only on one side): {', '.join(skipped)}")
-        prompt = "The following folders will be synced:\n\n" + "\n".join(lines)
-        prompt += "\n\nEach pair is saved as a profile so it can be re-run or scheduled later. Continue?"
-        if QMessageBox.question(
-            self, "Confirm Sync", prompt,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
-            return
+        # Safety check: scan both sides of every pair first, then show what
+        # each folder holds and warn about differences before syncing.
+        ctx = {
+            "local_root": local_root,
+            "remote_root": remote_root,
+            "remote_cfg": remote_cfg,
+            "host_label": host_label,
+            "force_mode": force_mode,
+            "force_direction": force_direction,
+            "direction_label": direction_label,
+            "delete_extra": delete_extra,
+            "skipped": skipped,
+            "copy_missing": copy_missing,
+        }
+        self._sync_checking = True
+        self._plan_status.setText("Checking folders before sync …")
+        self._plan_status.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        peer = self._peer
 
+        def _run() -> None:
+            results: List[Tuple[PeerPlan, PairCompare]] = []
+            for idx, plan in enumerate(to_run, start=1):
+                self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(to_run)} …")
+                local_path = plan.local_path or os.path.join(local_root, plan.name)
+                remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
+                results.append((plan, compare_pair(peer, local_path, remote_path, plan.name)))
+            self._signals.safety_checked.emit(results, ctx)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_safety_checked(self, results, ctx) -> None:
+        """Present the pre-sync safety check; continue only when confirmed."""
+        self._sync_checking = False
+        any_diff = any(cmp.has_differences for _, cmp in results)
+        if any_diff:
+            dlg = SyncSafetyDialog(self, results, ctx)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                self._plan_status.setText(
+                    "Sync cancelled — the folders look different. Review them, then try again.")
+                self._plan_status.setStyleSheet(f"color: {T.WARNING}; font-size: 12px;")
+                return
+        else:
+            lines = []
+            direction_label = ctx.get("direction_label") or ""
+            for plan, _cmp in results:
+                lines.append(f"- {plan.name}  →  {direction_label if direction_label else plan.direction}")
+            if ctx.get("delete_extra"):
+                lines.append("\nExtra files at the destination will be deleted (mirror).")
+            skipped = ctx.get("skipped") or []
+            if skipped:
+                lines.append(f"\nSkipped (only on one side): {', '.join(skipped)}")
+            prompt = "The following folders will be synced:\n\n" + "\n".join(lines)
+            prompt += "\n\nEach pair is saved as a profile so it can be re-run or scheduled later. Continue?"
+            if QMessageBox.question(
+                self, "Confirm Sync", prompt,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        self._start_syncs(results, ctx)
+
+    def _start_syncs(self, results, ctx) -> None:
         started = 0
-        for plan in to_run:
+        for plan, _cmp in results:
             profile = plan.build_profile(
-                local_root, remote_root, remote_cfg, host_label,
-                mode=force_mode, direction=force_direction,
+                ctx["local_root"], ctx["remote_root"], ctx["remote_cfg"], ctx["host_label"],
+                mode=ctx["force_mode"], direction=ctx["force_direction"],
             )
-            if delete_extra:
+            if ctx.get("delete_extra"):
                 profile.options.delete_extra = True
             profile = find_or_create_peer_profile(self._app.profile_mgr, profile)
             self._app.save_profile(profile)
             self._app.start_sync(profile.id)
             started += 1
+        self._plan_status.setStyleSheet("")
         self._plan_status.setText(f"Started {started} sync job(s). Progress is shown in the Monitor panel.")
+        skipped = ctx.get("skipped") or []
         if skipped:
             self._plan_status.setText(self._plan_status.text() + f"  Skipped: {', '.join(skipped)}")
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import stat as stat_mod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from core.config import APP_DIR_NAME
@@ -22,6 +22,37 @@ from core.syncer import FileInfo, LocalFS, SFTPFS
 
 
 DEFAULT_EXCLUDES: List[str] = list(FilterConfig().exclude_patterns)
+
+# ---------------------------------------------------------------------------
+# Content-type classification (used by the pre-sync safety check so the user
+# can see at a glance what kind of files each folder holds).
+# ---------------------------------------------------------------------------
+
+_CONTENT_CATEGORIES: List[Tuple[str, frozenset]] = [
+    ("Images", frozenset({".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg",
+                          ".tiff", ".tif", ".heic", ".ico", ".raw", ".psd"})),
+    ("Documents", frozenset({".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+                             ".txt", ".md", ".rtf", ".odt", ".ods", ".odp", ".csv", ".epub"})),
+    ("Code", frozenset({".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".h", ".cpp",
+                        ".hpp", ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".bash",
+                        ".html", ".htm", ".css", ".json", ".yaml", ".yml", ".toml",
+                        ".xml", ".sql", ".vue", ".ipynb", ".lua", ".swift", ".kt",
+                        ".m", ".dart"})),
+    ("Audio", frozenset({".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus", ".wma"})),
+    ("Video", frozenset({".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv", ".m4v"})),
+    ("Archives", frozenset({".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".zst"})),
+]
+_OTHER_CONTENT = "Other files"
+_CONTENT_ORDER: List[str] = [label for label, _ in _CONTENT_CATEGORIES] + [_OTHER_CONTENT]
+
+
+def classify_file_type(name: str) -> str:
+    """Return the content category of a file name (images/documents/code/…)."""
+    ext = os.path.splitext(name)[1].lower()
+    for label, exts in _CONTENT_CATEGORIES:
+        if ext in exts:
+            return label
+    return _OTHER_CONTENT
 
 # Name of the favourites file each computer keeps in its home directory.
 # It lives in the home dir so the *other* computer can read it over SFTP
@@ -422,6 +453,7 @@ class FolderScan:
     total_size: int = 0
     error: str = ""
     missing: bool = False     # folder does not exist on that side
+    contents: Dict[str, int] = field(default_factory=dict)  # category -> count
 
     def summary_line(self) -> str:
         if self.missing:
@@ -432,17 +464,34 @@ class FolderScan:
         when = datetime.fromtimestamp(self.latest_mtime).strftime("%Y-%m-%d %H:%M") if self.latest_mtime else "never"
         return f"{self.file_count} file(s), latest {when}"
 
+    def content_summary(self) -> str:
+        """Human-readable breakdown of what this folder holds, e.g.
+        '3 documents · 2 images · 1 archive'."""
+        if not self.contents:
+            return "no files"
+        parts = []
+        for label in _CONTENT_ORDER:
+            n = self.contents.get(label, 0)
+            if n:
+                parts.append(f"{n} {label.lower()}")
+        return " · ".join(parts)
+
 
 def _summarize(name: str, path: str, files: List[FileInfo]) -> FolderScan:
     files_only = [f for f in files if not f.is_dir]
     latest = max((f.mtime for f in files_only), default=0.0)
     total = sum(f.size for f in files_only)
+    contents: Dict[str, int] = {}
+    for f in files_only:
+        cat = classify_file_type(f.rel_path)
+        contents[cat] = contents.get(cat, 0) + 1
     return FolderScan(
         name=name,
         path=path,
         file_count=len(files_only),
         latest_mtime=latest,
         total_size=total,
+        contents=contents,
     )
 
 
@@ -536,6 +585,7 @@ def compare_pair(
             cmp.only_local_files,
             cmp.only_remote_files,
         ) = diff_file_maps(local_files, remote_files)
+        cmp.only_local_names, cmp.only_remote_names = diff_file_name_lists(local_files, remote_files)
     return cmp
 
 
@@ -555,6 +605,8 @@ class PairCompare:
     same_files: int = 0
     only_local_files: int = 0
     only_remote_files: int = 0
+    only_local_names: List[str] = field(default_factory=list)   # rel paths
+    only_remote_names: List[str] = field(default_factory=list)  # rel paths
 
     # ------------------------------------------------------------------
 
@@ -618,6 +670,53 @@ class PairCompare:
             parts.append(f"{self.only_remote_files} only on other PC")
         return "  ·  ".join(parts)
 
+    # ------------------------------------------------------------------
+    # Pre-sync safety reporting
+
+    @property
+    def has_differences(self) -> bool:
+        """True when the two folders differ in a way the user should be
+        warned about before syncing: different file names, newer files on
+        either side, or one of the folders missing/empty."""
+        if self.local.error or self.remote.error:
+            return False
+        return bool(
+            self.only_local_names
+            or self.only_remote_names
+            or self.local_newer_files
+            or self.remote_newer_files
+            or self.local.missing
+            or self.remote.missing
+            or self.local.file_count == 0
+            or self.remote.file_count == 0
+        )
+
+    def difference_lines(self) -> List[str]:
+        """Human-readable warnings for the pre-sync dialog (empty strings
+        omitted). Distinguishes missing folders from genuinely empty ones."""
+        lines: List[str] = []
+        if self.local.missing:
+            lines.append("This PC folder does not exist — nothing will be copied from it.")
+        elif not self.local.error and self.local.file_count == 0:
+            lines.append("This PC folder is empty — nothing will be copied from it.")
+        if self.remote.missing:
+            lines.append("Other PC folder does not exist — nothing will be copied from it.")
+        elif not self.remote.error and self.remote.file_count == 0:
+            lines.append("Other PC folder is empty — nothing will be copied from it.")
+        if self.only_local_names:
+            lines.append(
+                f"{len(self.only_local_names)} file(s) only on this PC: {_short_list(self.only_local_names)}"
+            )
+        if self.only_remote_names:
+            lines.append(
+                f"{len(self.only_remote_names)} file(s) only on other PC: {_short_list(self.only_remote_names)}"
+            )
+        if self.local_newer_files:
+            lines.append(f"{self.local_newer_files} file(s) newer on this PC")
+        if self.remote_newer_files:
+            lines.append(f"{self.remote_newer_files} file(s) newer on other PC")
+        return lines
+
     @property
     def newest_side(self) -> str:
         """Which side holds the most recently modified file.
@@ -655,6 +754,26 @@ def compare_folders(name: str, local: FolderScan, remote: FolderScan) -> PairCom
     may fill in the diff counters directly).
     """
     return PairCompare(name=name, local=local, remote=remote)
+
+
+def _short_list(names: List[str], max_show: int = 6) -> str:
+    """Comma-join file names, truncating with '+N more' when long."""
+    shown = names[:max_show]
+    text = ", ".join(shown)
+    if len(names) > max_show:
+        text += f", … (+{len(names) - max_show} more)"
+    return text
+
+
+def diff_file_name_lists(
+    local_files: List[FileInfo],
+    remote_files: List[FileInfo],
+) -> Tuple[List[str], List[str]]:
+    """Return (only_local_names, only_remote_names) — rel paths of files
+    present on exactly one side (sorted)."""
+    local_names = {f.rel_path for f in local_files if not f.is_dir}
+    remote_names = {f.rel_path for f in remote_files if not f.is_dir}
+    return sorted(local_names - remote_names), sorted(remote_names - local_names)
 
 
 def diff_file_maps(
