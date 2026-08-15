@@ -286,6 +286,65 @@ class PeerSyncPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # All sync controls + action buttons pinned in a single header row so
+        # they stay visible and vertically aligned while the connection /
+        # folder / plan sections scroll below.
+        header = QWidget(self)
+        header.setStyleSheet(
+            f"background-color: {T.BG_PANEL}; border-bottom: 1px solid {T.BORDER};"
+        )
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(T.PAD_LG, 0, T.PAD_LG, 0)
+        header_layout.setSpacing(T.PAD_SM)
+
+        # Settings cluster (left)
+        direction_label = MutedLabel("Sync direction")
+        direction_label.setFixedHeight(28)
+        header_layout.addWidget(direction_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._direction_combo = QComboBox()
+        self._direction_combo.addItem("Two-way (automatic)", "auto")
+        self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
+        self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
+        self._direction_combo.setFixedHeight(28)
+        header_layout.addWidget(self._direction_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._delete_extra_cb = QCheckBox("Delete extra files at destination")
+        self._delete_extra_cb.setEnabled(False)
+        self._delete_extra_cb.setFixedHeight(28)
+        header_layout.addWidget(self._delete_extra_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._copy_missing_cb = QCheckBox("Copy folders that exist on only one side")
+        self._copy_missing_cb.setChecked(True)
+        self._copy_missing_cb.setFixedHeight(28)
+        header_layout.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        attach_tooltip(self._direction_combo,
+                       "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
+                       "copied across. Pick a one-way direction to always copy that way instead.")
+        attach_tooltip(self._delete_extra_cb,
+                       "When a one-way direction is chosen, also delete files at the destination that no longer "
+                       "exist in the source (mirror sync). Not available for two-way.")
+        attach_tooltip(self._copy_missing_cb, "Folders checked on one side only are copied to the other side.")
+        self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
+
+        # Action buttons (right)
+        header_layout.addStretch()
+        compare_btn = GhostButton("≋  Compare Selected", header, command=self._compare_selected)
+        compare_btn.setFixedHeight(28)
+        header_layout.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._fav_sync_btn = GhostButton("★  Sync Favourites", header, command=self._sync_favorites)
+        self._fav_sync_btn.setFixedHeight(28)
+        header_layout.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sync_remote_btn = GhostButton("⇄  Sync Remote List", header, command=self._sync_remote_list)
+        self._sync_remote_btn.setFixedHeight(28)
+        header_layout.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sync_btn = PrimaryButton("▶  Sync Selected", header, command=self._sync_selected)
+        self._sync_btn.setFixedHeight(28)
+        header_layout.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(header)
+
+        attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
+        attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
+        attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
+        attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
+
         scroll = ScrollArea(self)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -453,52 +512,10 @@ class PeerSyncPanel(QWidget):
         )
         plan_layout.addWidget(self._plan_table)
 
-        direction_row = QHBoxLayout()
-        direction_row.addWidget(MutedLabel("Sync direction"))
-        self._direction_combo = QComboBox()
-        self._direction_combo.addItem("Two-way (automatic)", "auto")
-        self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
-        self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
-        self._direction_combo.setMinimumWidth(220)
-        direction_row.addWidget(self._direction_combo)
-        self._delete_extra_cb = QCheckBox("Delete extra files at destination")
-        self._delete_extra_cb.setEnabled(False)
-        direction_row.addWidget(self._delete_extra_cb)
-        direction_row.addStretch()
-        plan_layout.addLayout(direction_row)
-        attach_tooltip(self._direction_combo,
-                       "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
-                       "copied across. Pick a one-way direction to always copy that way instead.")
-        attach_tooltip(self._delete_extra_cb,
-                       "When a one-way direction is chosen, also delete files at the destination that no longer "
-                       "exist in the source (mirror sync). Not available for two-way.")
-        self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
-
-        plan_row = QHBoxLayout()
-        self._copy_missing_cb = QCheckBox("Copy folders that exist on only one side")
-        self._copy_missing_cb.setChecked(True)
-        plan_row.addWidget(self._copy_missing_cb)
-        plan_row.addStretch()
-        compare_btn = GhostButton("≋  Compare Selected", plan_card, command=self._compare_selected)
-        plan_row.addWidget(compare_btn)
-        self._fav_sync_btn = GhostButton("★  Sync Favourites", plan_card, command=self._sync_favorites)
-        plan_row.addWidget(self._fav_sync_btn)
-        self._sync_remote_btn = GhostButton("⇄  Sync Remote List", plan_card, command=self._sync_remote_list)
-        plan_row.addWidget(self._sync_remote_btn)
-        self._sync_btn = PrimaryButton("▶  Sync Selected", plan_card, command=self._sync_selected)
-        plan_row.addWidget(self._sync_btn)
-        plan_layout.addLayout(plan_row)
-
         self._plan_status = MutedLabel("Tick folders on either side, then Compare or Sync.")
         plan_layout.addWidget(self._plan_status)
         host_layout.addWidget(plan_card)
         host_layout.addStretch()
-
-        attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
-        attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
-        attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
-        attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
-        attach_tooltip(self._copy_missing_cb, "Folders checked on one side only are copied to the other side.")
 
         self._set_connected_ui(False)
         self._populate_connections()
