@@ -796,7 +796,7 @@ class SyncEngine:
 
         include_patterns = list(flt.include_patterns)
         exclude_patterns = list(flt.exclude_patterns)
-        for pat in (".venv*", "*:Zone.Identifier"):
+        for pat in (".venv*", "venv", "*:Zone.Identifier"):
             if pat not in exclude_patterns:
                 exclude_patterns.append(pat)
 

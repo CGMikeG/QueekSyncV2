@@ -125,6 +125,7 @@ class FilterConfig:
             "Thumbs.db",
             "__pycache__",
             ".venv*",
+            "venv",
             "*:Zone.Identifier",
         ]
     )
