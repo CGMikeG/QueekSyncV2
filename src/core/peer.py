@@ -280,6 +280,26 @@ def delete_peer_connection(name: str) -> bool:
     return True
 
 
+def rename_peer_connection(old_name: str, new_name: str) -> bool:
+    """Rename a saved connection, keeping its position in the list.
+
+    Returns True when the rename happened; False when the old name is
+    missing, the new name is empty, or the new name is already taken.
+    """
+    new_name = (new_name or "").strip()
+    if not new_name or new_name == old_name:
+        return False
+    conns = load_peer_connections()
+    if any(c.name == new_name for c in conns):
+        return False
+    conn = next((c for c in conns if c.name == old_name), None)
+    if conn is None:
+        return False
+    conn.name = new_name
+    save_peer_connections(conns)
+    return True
+
+
 def touch_peer_connection(name: str) -> None:
     """Move a connection to the front of the list (most recently used)."""
     conns = load_peer_connections()

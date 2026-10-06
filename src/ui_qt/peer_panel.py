@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -55,6 +56,7 @@ from core.peer import (
     read_remote_sync_list,
     remove_local_favorite,
     remove_from_sync_list,
+    rename_peer_connection,
     save_local_favorites,
     save_peer_connections,
     touch_peer_connection,
@@ -383,18 +385,30 @@ class PeerSyncPanel(QWidget):
         saved_btn_row = QHBoxLayout()
         self._load_conn_btn = PrimaryButton("Load", saved_card, command=self._load_connection)
         saved_btn_row.addWidget(self._load_conn_btn)
-        save_btn = GhostButton("Save current connection", saved_card, command=self._save_connection)
-        saved_btn_row.addWidget(save_btn)
+        new_conn_btn = GhostButton("New", saved_card, command=self._new_connection)
+        saved_btn_row.addWidget(new_conn_btn)
+        save_conn_btn = GhostButton("Save", saved_card, command=self._save_connection)
+        saved_btn_row.addWidget(save_conn_btn)
+        self._rename_conn_btn = GhostButton("Rename", saved_card, command=self._rename_connection)
+        saved_btn_row.addWidget(self._rename_conn_btn)
         self._delete_conn_btn = GhostButton("Delete", saved_card, command=self._delete_connection)
         saved_btn_row.addWidget(self._delete_conn_btn)
         saved_btn_row.addStretch()
         saved_layout.addLayout(saved_btn_row)
+        attach_tooltip(new_conn_btn,
+                       "Start a new connection: clears the fields so the next Save adds a separate "
+                       "connection instead of updating the selected one.")
+        attach_tooltip(save_conn_btn,
+                       "Save the name and details above. A new name adds a connection; keeping the "
+                       "loaded connection's name updates it.")
+        attach_tooltip(self._rename_conn_btn, "Rename the selected saved connection.")
 
         self._conn_hint = MutedLabel("")
         saved_layout.addWidget(self._conn_hint)
         host_layout.addWidget(saved_card)
         attach_tooltip(self._conn_list, "Select a saved SSH connection and click Load to connect, "
-                                        "or click Save current connection to store the details you typed.")
+                                        "or fill in the name and details below and click Save. "
+                                        "Click New first to add another connection.")
 
         # ── 1 · Connection ────────────────────────────────────────────
         conn_card = GlassCard(host)
@@ -406,15 +420,17 @@ class PeerSyncPanel(QWidget):
         grid = QGridLayout()
         grid.setHorizontalSpacing(T.PAD_SM)
         grid.setVerticalSpacing(T.PAD_SM)
+        self._name_entry = LabelledEntry("Connection name", placeholder="e.g. MSI laptop")
         self._host_entry = LabelledEntry("IP address or hostname", placeholder="192.168.1.50")
         self._port_entry = LabelledEntry("SSH port", placeholder="22")
         self._port_entry.set("22")
         self._user_entry = LabelledEntry("Username")
         self._pass_entry = LabelledEntry("Password", show="●")
-        grid.addWidget(self._host_entry, 0, 0)
-        grid.addWidget(self._port_entry, 0, 1)
-        grid.addWidget(self._user_entry, 1, 0)
-        grid.addWidget(self._pass_entry, 1, 1)
+        grid.addWidget(self._name_entry, 0, 0, 1, 2)
+        grid.addWidget(self._host_entry, 1, 0)
+        grid.addWidget(self._port_entry, 1, 1)
+        grid.addWidget(self._user_entry, 2, 0)
+        grid.addWidget(self._pass_entry, 2, 1)
         conn_layout.addLayout(grid)
 
         conn_row = QHBoxLayout()
@@ -539,7 +555,8 @@ class PeerSyncPanel(QWidget):
         lst.itemChanged.connect(self._on_item_changed)
         lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lst.customContextMenuRequested.connect(self._on_list_context_menu)
-        attach_tooltip(lst, "Right-click a ★ favourite folder to remove it from favourites.")
+        attach_tooltip(lst, "Right-click any folder to add it to favourites (★), or right-click "
+                            "a ★ favourite to remove it.")
         lst.setStyleSheet(
             f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; padding: 4px; }}"
@@ -590,7 +607,18 @@ class PeerSyncPanel(QWidget):
     # Saved connections
     # ==================================================================
 
-    def _populate_connections(self) -> None:
+    def _populate_connections(self, select_name: Optional[str] = None) -> None:
+        """Rebuild the saved-connection list, keeping the selection where possible.
+
+        ``select_name`` picks the connection to select (used after a save or
+        rename); otherwise the previously selected connection stays selected.
+        """
+        if select_name is None:
+            row = self._conn_list.currentRow()
+            previous = self._connections or []
+            if 0 <= row < len(previous):
+                select_name = previous[row].name
+
         self._connections = load_peer_connections()
         self._conn_list.blockSignals(True)
         self._conn_list.clear()
@@ -602,25 +630,38 @@ class PeerSyncPanel(QWidget):
         self._conn_list.blockSignals(False)
         has_connections = bool(self._connections)
         self._load_conn_btn.setEnabled(has_connections)
+        self._rename_conn_btn.setEnabled(has_connections)
         self._delete_conn_btn.setEnabled(has_connections)
         if has_connections:
-            self._conn_list.setCurrentRow(0)
-            self._fill_connection_fields(self._connections[0])
+            index = next(
+                (i for i, c in enumerate(self._connections) if c.name == select_name), 0
+            )
+            self._conn_list.setCurrentRow(index)
+            self._fill_connection_fields(self._connections[index])
             self._conn_hint.setText("Select a connection and click Load to connect to it.")
         else:
+            self._conn_list.setCurrentRow(-1)
             self._conn_hint.setText("No saved connections yet - enter the details below, "
-                                    "then click 'Save current connection'.")
+                                    "then click 'Save'.")
 
     @staticmethod
     def _conn_label(c: PeerConnectionConfig) -> str:
         return f"{c.name}  ({c.username}@{c.host}:{c.port})"
 
     def _fill_connection_fields(self, c: PeerConnectionConfig) -> None:
+        self._name_entry.set(c.name)
         self._host_entry.set(c.host)
         self._port_entry.set(str(c.port))
         self._user_entry.set(c.username)
         self._pass_entry.set(c.password if c.remember_password else "")
         self._remember_cb.setChecked(c.remember_password)
+
+    def _selected_connection_name(self) -> str:
+        """Name of the saved connection highlighted in the list ("" when none)."""
+        row = self._conn_list.currentRow()
+        if 0 <= row < len(self._connections):
+            return self._connections[row].name
+        return ""
 
     def _on_conn_selected(self, index: int) -> None:
         if index < 0 or index >= len(self._connections):
@@ -640,13 +681,55 @@ class PeerSyncPanel(QWidget):
         self._connect()
 
     def _current_connection_name(self) -> str:
-        row = self._conn_list.currentRow()
-        if 0 <= row < len(self._connections):
-            return self._connections[row].name
+        """Name for a save: the Connection name field, else the selected
+        connection, else user@host."""
+        typed = self._name_entry.get().strip()
+        if typed:
+            return typed
+        selected = self._selected_connection_name()
+        if selected:
+            return selected
         user = self._user_entry.get().strip()
         host = self._host_entry.get().strip()
-        text = f"{user}@{host}" if user else host
-        return text
+        return f"{user}@{host}" if user else host
+
+    def _new_connection(self) -> None:
+        """Clear the form so the next Save adds a separate connection."""
+        self._conn_list.setCurrentRow(-1)
+        self._name_entry.set("")
+        self._host_entry.set("")
+        self._port_entry.set("22")
+        self._user_entry.set("")
+        self._pass_entry.set("")
+        self._remember_cb.setChecked(True)
+        self._conn_hint.setText("New connection - enter a name and the details below, then click "
+                                "Save. Saved connections are left unchanged.")
+        self._status_lbl.setText("Fill in the new connection's name and details, then click Save.")
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+
+    def _rename_connection(self) -> None:
+        """Rename the selected saved connection."""
+        old_name = self._selected_connection_name()
+        if not old_name:
+            QMessageBox.information(self, "Rename Connection", "Select a saved connection first.")
+            return
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Connection", f"New name for '{old_name}':", text=old_name
+        )
+        new_name = (new_name or "").strip()
+        if not ok or not new_name or new_name == old_name:
+            return
+        if any(c.name == new_name for c in self._connections):
+            QMessageBox.warning(
+                self, "Rename Connection", f"A connection named '{new_name}' already exists."
+            )
+            return
+        if not rename_peer_connection(old_name, new_name):
+            QMessageBox.warning(self, "Rename Connection", "Could not rename the connection.")
+            return
+        self._populate_connections(select_name=new_name)
+        self._status_lbl.setText(f"Renamed '{old_name}' to '{new_name}'.")
+        self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
 
     def _save_connection(self) -> None:
         host = self._host_entry.get().strip()
@@ -658,7 +741,33 @@ class PeerSyncPanel(QWidget):
             port = int(self._port_entry.get() or 22)
         except ValueError:
             port = 22
-        name = self._current_connection_name()
+
+        name = self._current_connection_name() or host
+        selected = self._selected_connection_name()
+        exists = any(c.name == name for c in self._connections)
+
+        if exists and name != selected:
+            # Saving over a different connection's name - make sure that is meant.
+            if QMessageBox.question(
+                self, "Save Connection",
+                f"A connection named '{name}' already exists.\n\n"
+                "Replace it with the details above?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        elif selected and name != selected and not exists:
+            # The name no longer matches the loaded connection: offer a rename so
+            # editing the name here never silently leaves a duplicate behind.
+            if QMessageBox.question(
+                self, "Rename Connection",
+                f"Rename '{selected}' to '{name}'?\n\n"
+                f"Choosing No saves these details as a separate connection instead.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) == QMessageBox.StandardButton.Yes:
+                rename_peer_connection(selected, name)
+
         conn = PeerConnectionConfig(
             name=name or host,
             host=host,
@@ -668,7 +777,7 @@ class PeerSyncPanel(QWidget):
             remember_password=self._remember_cb.isChecked(),
         )
         is_new = upsert_peer_connection(conn)
-        self._populate_connections()
+        self._populate_connections(select_name=conn.name)
         self._status_lbl.setText(
             f"Saved connection '{conn.name}'. " + ("Select it in the Saved connections panel and click Load to connect." if is_new else "Updated.")
         )
@@ -975,47 +1084,79 @@ class PeerSyncPanel(QWidget):
         self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
         self._render_lists()
 
+    @staticmethod
+    def _menu_style(danger: bool = False, dim: bool = False) -> str:
+        """Themed QMenu stylesheet: ``danger`` = red destructive item,
+        ``dim`` = greyed-out informational item, else normal menu text."""
+        if danger:
+            item = (f"QMenu::item {{ background: transparent; color: {T.ERROR};"
+                    f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
+                    f"QMenu::item:selected {{ background-color: #7f1d1d; }}")
+        elif dim:
+            item = (f"QMenu::item {{ background: transparent; color: {T.TEXT_DIM};"
+                    f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}")
+        else:
+            item = (f"QMenu::item {{ background: transparent; color: {T.TEXT};"
+                    f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
+                    f"QMenu::item:selected {{ background-color: {T.BG_HOVER}; }}")
+        return (f"QMenu {{ background-color: {T.BG_CARD}; border: 1px solid {T.BORDER};"
+                f" border-radius: {T.RADIUS_MD}px; padding: 6px; }}" + item)
+
     def _on_list_context_menu(self, pos) -> None:
-        """Right-click menu on a folder row: remove a favourite folder."""
+        """Right-click a folder row: add it to favourites, or remove an
+        existing ★ favourite from them."""
         lst = self.sender()
         if not isinstance(lst, QListWidget) or (lst is not self._local_list and lst is not self._remote_list):
             return
         item = lst.itemAt(pos)
         if item is None:
             return
-        kind = item.data(_R_KIND)
-        if kind != "fav":
-            return
         path = item.data(_R_PATH)
         name = item.data(_R_NAME)
+        kind = item.data(_R_KIND)
 
         menu = QMenu(self)
-        if lst is self._local_list:
+        if lst is self._remote_list:
+            # The other computer owns its own favourites / sync list.
+            menu.setStyleSheet(self._menu_style(dim=True))
+            act = menu.addAction("Managed on the other computer")
+            assert act is not None
+            act.setEnabled(False)
+            act.setToolTip("This is the other computer's folder list. Add favourites for it on "
+                           "that computer's Peer Sync page.")
+        elif kind == "fav":
             # Destructive action → follow the app's DangerButton look
             # (red on dark red) instead of the default washed-out menu text.
-            menu.setStyleSheet(
-                f"QMenu {{ background-color: {T.BG_CARD}; border: 1px solid {T.BORDER};"
-                f" border-radius: {T.RADIUS_MD}px; padding: 6px; }}"
-                f"QMenu::item {{ background: transparent; color: {T.ERROR};"
-                f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
-                f"QMenu::item:selected {{ background-color: #7f1d1d; }}"
-            )
+            menu.setStyleSheet(self._menu_style(danger=True))
             act = menu.addAction("★  Remove from favourites")
             assert act is not None
             act.triggered.connect(lambda: self._remove_favorite(path, name))
         else:
-            menu.setStyleSheet(
-                f"QMenu {{ background-color: {T.BG_CARD}; border: 1px solid {T.BORDER};"
-                f" border-radius: {T.RADIUS_MD}px; padding: 6px; }}"
-                f"QMenu::item {{ background: transparent; color: {T.TEXT_DIM};"
-                f" padding: 7px 14px; border-radius: {T.RADIUS_SM}px; }}"
-            )
-            act = menu.addAction("Managed on the other computer")
+            menu.setStyleSheet(self._menu_style())
+            act = menu.addAction("★  Add to favourites")
             assert act is not None
-            act.setEnabled(False)
-            act.setToolTip("This is the other computer's favourites list. Remove folders there "
-                           "on that computer's Peer Sync page.")
+            act.triggered.connect(lambda: self._add_favorite(path, name))
         menu.exec(lst.viewport().mapToGlobal(pos))
+
+    def _add_favorite(self, path: str, name: str) -> None:
+        """Add a folder from the list to this computer's favourites."""
+        norm = _norm(path)
+        items = list(self._favs.get("local") or [])
+        if norm in [_norm(p) for p in items]:
+            return
+        add_local_favorite(path)
+        if norm not in [_norm(p) for p in items]:
+            items.append(path)
+        self._favs["local"] = items
+        # Keep the row ticked if it was selected before becoming a favourite, so
+        # adding a favourite never drops a folder out of the pending sync.
+        if self._checked.pop(f"dir:{norm}", False) or self._checked.pop(f"sync:{path}", False):
+            self._checked[f"fav:{path}"] = True
+        self._status_lbl.setText(
+            f"Added '{name}' to favourites. The other computer will see it when it connects."
+        )
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._render_lists()
 
     def _remove_favorite(self, path: str, name: str) -> None:
         """Remove a favourite folder from this computer's favourites list."""
