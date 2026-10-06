@@ -323,6 +323,68 @@ def read_remote_favorites(peer: "PeerConnection") -> List[str]:
         return []
 
 
+def _remote_norm(path: str) -> str:
+    """Normalise a path that lives on the other computer (always POSIX)."""
+    return path.replace("\\", "/").rstrip("/") or "/"
+
+
+def write_remote_favorites(peer: "PeerConnection", paths: List[str]) -> None:
+    """Replace the other computer's favourites file over SFTP.
+
+    Written to a temporary file and renamed into place, so losing the
+    connection mid-write cannot leave the other computer with a truncated
+    favourites file. Raises on failure so the caller can tell the user.
+    """
+    remote_path = f"{peer.home_dir.rstrip('/')}/{FAVORITES_FILE_NAME}"
+    tmp_path = remote_path + ".tmp"
+    if peer.sftp is None:
+        raise RuntimeError("Not connected to the other computer.")
+    cleaned = sorted({_remote_norm(p) for p in paths if p})
+    payload = json.dumps({"version": 1, "favorites": cleaned}, indent=2)
+    with peer.sftp.open(tmp_path, "w") as fh:
+        fh.write(payload)
+    try:
+        peer.sftp.posix_rename(tmp_path, remote_path)
+    except IOError:
+        # Server without the POSIX rename extension: remove then rename.
+        try:
+            peer.sftp.remove(remote_path)
+        except IOError:
+            pass
+        peer.sftp.rename(tmp_path, remote_path)
+
+
+def add_remote_favorite(peer: "PeerConnection", path: str) -> bool:
+    """Add a folder to the other computer's own favourites over SFTP.
+
+    The favourite is stored on that computer, so it shows up there too and
+    any other computer connecting to it sees the same ★ row. Returns True
+    when newly added, False when it was already a favourite; raises when the
+    write fails.
+    """
+    norm = _remote_norm(path)
+    favs = read_remote_favorites(peer)
+    if any(_remote_norm(f) == norm for f in favs):
+        return False
+    write_remote_favorites(peer, favs + [norm])
+    return True
+
+
+def remove_remote_favorite(peer: "PeerConnection", path: str) -> bool:
+    """Remove a folder from the other computer's own favourites over SFTP.
+
+    Returns True when it was a favourite, False when it was not; raises when
+    the write fails.
+    """
+    norm = _remote_norm(path)
+    favs = read_remote_favorites(peer)
+    kept = [f for f in favs if _remote_norm(f) != norm]
+    if len(kept) == len(favs):
+        return False
+    write_remote_favorites(peer, kept)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Remote connection
 # ---------------------------------------------------------------------------

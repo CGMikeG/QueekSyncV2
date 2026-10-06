@@ -139,9 +139,11 @@ click **★ Favourite** / **⇄ Sync List** next to it - no need to select a
 folder from the list first. Favourites are stored in
 `~/.queeksync-favorites.json`, the sync list in `~/.queeksync-sync-list.json`
 (both in the home folder), and the other computer downloads them
-automatically when it connects. To remove a favourite, right-click its ★ row
-in the folder list and choose **Remove from favourites** (the other
-computer's favourites are managed on that computer). Click
+automatically when it connects. Right-click any folder in either list to add it
+to favourites, and right-click a ★ row to remove it again. On the **other
+computer's list** the favourite is saved in *that* computer's own favourites
+file over SSH, so it shows up there too (and any other computer connecting to
+it sees the same ★ row). Click
 **⇄ Sync Remote List** to download the
 other computer's list and sync every folder on it in one click (folders that
 exist on both computers sync two-way, one-sided folders are copied across).

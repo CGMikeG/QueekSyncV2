@@ -46,6 +46,7 @@ from core.peer import (
     PeerPlace,
     PeerPlan,
     add_local_favorite,
+    add_remote_favorite,
     add_to_sync_list,
     compare_pair,
     delete_peer_connection,
@@ -58,6 +59,7 @@ from core.peer import (
     read_remote_sync_list,
     remote_places,
     remove_local_favorite,
+    remove_remote_favorite,
     remove_from_sync_list,
     rename_peer_connection,
     save_local_favorites,
@@ -724,8 +726,9 @@ class PeerSyncPanel(QWidget):
         lst.itemChanged.connect(self._on_item_changed)
         lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lst.customContextMenuRequested.connect(self._on_list_context_menu)
-        attach_tooltip(lst, "Right-click any folder to add it to favourites (★), or right-click "
-                            "a ★ favourite to remove it.")
+        attach_tooltip(lst, "Right-click a folder to add it to favourites (★); right-click a ★ "
+                            "favourite to remove it. On the other computer's list the favourite "
+                            "is saved on that computer.")
         lst.setStyleSheet(
             f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; padding: 4px; }}"
@@ -1297,13 +1300,19 @@ class PeerSyncPanel(QWidget):
 
         menu = QMenu(self)
         if lst is self._remote_list:
-            # The other computer owns its own favourites / sync list.
-            menu.setStyleSheet(self._menu_style(dim=True))
-            act = menu.addAction("Managed on the other computer")
-            assert act is not None
-            act.setEnabled(False)
-            act.setToolTip("This is the other computer's folder list. Add favourites for it on "
-                           "that computer's Peer Sync page.")
+            # A favourite for a folder on the other computer is stored in THAT
+            # computer's favourites file (over SFTP), so it shows up there too
+            # and stays correct when it is the one doing the syncing.
+            if kind == "fav":
+                menu.setStyleSheet(self._menu_style(danger=True))
+                act = menu.addAction("★  Remove from the other computer's favourites")
+                assert act is not None
+                act.triggered.connect(lambda: self._remove_remote_favorite(path, name))
+            else:
+                menu.setStyleSheet(self._menu_style())
+                act = menu.addAction("★  Add to the other computer's favourites")
+                assert act is not None
+                act.triggered.connect(lambda: self._add_remote_favorite(path, name))
         elif kind == "fav":
             # Destructive action → follow the app's DangerButton look
             # (red on dark red) instead of the default washed-out menu text.
@@ -1335,6 +1344,63 @@ class PeerSyncPanel(QWidget):
         self._status_lbl.setText(
             f"Added '{name}' to favourites. The other computer will see it when it connects."
         )
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._render_lists()
+
+    def _add_remote_favorite(self, path: str, name: str) -> None:
+        """Add a folder on the other computer to ITS favourites, over SFTP."""
+        if self._peer is None:
+            return
+        norm = _norm(path)
+        try:
+            added = add_remote_favorite(self._peer, path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Favourites",
+                f"Could not save the favourite on the other computer:\n\n{exc}")
+            return
+        if not added:
+            return
+        items = list(self._favs.get("remote") or [])
+        if norm not in [_norm(p) for p in items]:
+            items.append(path)
+        self._favs["remote"] = items
+        # Keep the row ticked if it was selected before becoming a favourite.
+        if self._checked.pop(f"dir:{norm}", False) or self._checked.pop(f"sync:{path}", False):
+            self._checked[f"fav:{path}"] = True
+        self._status_lbl.setText(
+            f"Added '{name}' to the other computer's favourites - saved on "
+            f"{self._peer.host}, so it is there when that computer runs QueekSync too."
+        )
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._render_lists()
+
+    def _remove_remote_favorite(self, path: str, name: str) -> None:
+        """Remove a favourite from the other computer's favourites, over SFTP."""
+        if self._peer is None:
+            return
+        norm = _norm(path)
+        if QMessageBox.question(
+            self, "Remove Favourite",
+            f"Remove '{name}' from the other computer's favourites?\n\n{path}\n\n"
+            f"({self._peer.host})",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = remove_remote_favorite(self._peer, path)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "Favourites",
+                f"Could not remove the favourite on the other computer:\n\n{exc}")
+            return
+        if not removed:
+            return
+        self._favs["remote"] = [p for p in (self._favs.get("remote") or []) if _norm(p) != norm]
+        for key in [k for k in self._checked if k.startswith("fav:") and _norm(k[4:]) == norm]:
+            self._checked.pop(key, None)
+        self._status_lbl.setText(f"Removed '{name}' from the other computer's favourites.")
         self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
         self._render_lists()
 
