@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -42,6 +43,7 @@ from core.peer import (
     PairCompare,
     PeerConnection,
     PeerConnectionConfig,
+    PeerPlace,
     PeerPlan,
     add_local_favorite,
     add_to_sync_list,
@@ -54,6 +56,7 @@ from core.peer import (
     load_peer_connections,
     read_remote_favorites,
     read_remote_sync_list,
+    remote_places,
     remove_local_favorite,
     remove_from_sync_list,
     rename_peer_connection,
@@ -250,6 +253,168 @@ class SyncSafetyDialog(QDialog):
         if skipped:
             parts.append(f"Skipped (only on one side): {', '.join(skipped)}")
         return "  ·  ".join(parts)
+
+
+class RemoteFolderDialog(QDialog):
+    """Pick a base folder on the other computer by browsing its drives.
+
+    Lists the other computer's places - its home folder, the filesystem root
+    and every mounted volume (extra/internal media drives) - plus the folders
+    inside the current one, so a folder on another drive can be chosen without
+    typing its path.
+    """
+
+    _R_PLACE = Qt.ItemDataRole.UserRole
+
+    def __init__(self, parent, peer: PeerConnection, start_path: str = "") -> None:
+        super().__init__(parent)
+        self._peer = peer
+        self._path = (start_path or peer.home_dir or "/").rstrip("/") or "/"
+        self.chosen_path = ""
+
+        self.setWindowTitle("Choose a folder on the other computer")
+        self.setModal(True)
+        self.resize(640, 620)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(T.PAD_LG, T.PAD_LG, T.PAD_LG, T.PAD_LG)
+        root.setSpacing(T.PAD_SM)
+
+        title = QLabel("Choose a base folder on the other computer")
+        title.setStyleSheet(f"color: {T.TEXT}; font-size: 17px; font-weight: 700;")
+        root.addWidget(title)
+
+        hint = MutedLabel(
+            f"{peer.username}@{peer.host} — pick one of its drives below, then open the "
+            "folder you want to sync."
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        root.addWidget(SectionLabel("Drives and places on the other computer"))
+        self._places = QListWidget()
+        self._places.setMaximumHeight(140)
+        self._places.itemClicked.connect(self._on_place_chosen)
+        self._places.itemActivated.connect(self._on_place_chosen)
+        self._places.setStyleSheet(self._list_style())
+        attach_tooltip(self._places, "Mounted drives found on the other computer, plus its "
+                                     "home folder and the filesystem root.")
+        root.addWidget(self._places)
+
+        root.addWidget(SectionLabel("Folders here"))
+        path_row = QHBoxLayout()
+        self._up_btn = GhostButton("↑  Up", self, command=self._go_up)
+        self._up_btn.setFixedSize(80, 30)
+        path_row.addWidget(self._up_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._path_lbl = QLabel(self._path)
+        self._path_lbl.setWordWrap(True)
+        self._path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._path_lbl.setStyleSheet(f"color: {T.ACCENT}; font-size: 12px; font-weight: 600;")
+        path_row.addWidget(self._path_lbl, 1)
+        root.addLayout(path_row)
+
+        self._folders = QListWidget()
+        self._folders.itemActivated.connect(self._on_folder_chosen)
+        self._folders.setStyleSheet(self._list_style())
+        attach_tooltip(self._folders, "Double-click a folder to open it.")
+        root.addWidget(self._folders, 1)
+
+        self._status = MutedLabel("")
+        self._status.setWordWrap(True)
+        root.addWidget(self._status)
+
+        btn_row = QHBoxLayout()
+        cancel = GhostButton("Cancel", self, command=self.reject)
+        btn_row.addStretch()
+        btn_row.addWidget(cancel)
+        use_btn = PrimaryButton("Use this folder", self, command=self._use_this_folder)
+        btn_row.addWidget(use_btn)
+        root.addLayout(btn_row)
+        attach_tooltip(use_btn, "Use the folder shown above as the other computer's base folder.")
+
+        self._load_places()
+        self._show_folder(self._path)
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _list_style() -> str:
+        return (
+            f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
+            f" border-radius: 8px; padding: 4px; }}"
+            f"QListWidget::item {{ padding: 5px 8px; border-radius: 4px; }}"
+            f"QListWidget::item:selected {{ background-color: {T.BG_HOVER};"
+            f" border: 1px solid {T.ACCENT}; }}"
+        )
+
+    def _load_places(self) -> None:
+        """Fill the places list with the other computer's drives and roots."""
+        self._places.clear()
+        try:
+            places: List[PeerPlace] = remote_places(self._peer)
+        except Exception as exc:
+            places = []
+            self._set_status(f"Could not read the other computer's drives: {exc}", T.ERROR)
+        for place in places:
+            if place.kind == "drive":
+                text = f"{place.label}   ·   {place.path}"
+            elif place.kind == "home":
+                text = f"Home folder   ·   {place.path}"
+            else:
+                text = f"File system   ·   {place.path}"
+            item = QListWidgetItem(text)
+            item.setData(self._R_PLACE, place.path)
+            item.setToolTip(f"Open {place.path}")
+            self._places.addItem(item)
+
+    def _on_place_chosen(self, item: QListWidgetItem) -> None:
+        path = item.data(self._R_PLACE)
+        if path:
+            self._show_folder(path)
+
+    def _on_folder_chosen(self, item: QListWidgetItem) -> None:
+        self._show_folder(f"{self._path.rstrip('/')}/{item.text()}")
+
+    def _go_up(self) -> None:
+        if self._path in ("", "/"):
+            return
+        self._show_folder(self._path.rsplit("/", 1)[0] or "/")
+
+    def _show_folder(self, path: str) -> None:
+        """List the folders inside ``path`` on the other computer."""
+        path = path.rstrip("/") or "/"
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            names = [f["name"] for f in self._peer.list_folders(path)]
+            error = ""
+        except Exception as exc:
+            names, error = [], str(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        self._path = path
+        self._path_lbl.setText(path)
+        self._up_btn.setEnabled(path != "/")
+        self._folders.clear()
+        for name in names:
+            self._folders.addItem(QListWidgetItem(name))
+
+        if error:
+            self._set_status(f"Could not open {path}: {error}", T.ERROR)
+        elif not names:
+            self._set_status("No folders inside this one - you can still use it as the base folder.",
+                             T.TEXT_MUTED)
+        else:
+            self._set_status(f"{len(names)} folder(s). Double-click one to open it, or click "
+                             "'Use this folder'.", T.TEXT_MUTED)
+
+    def _set_status(self, text: str, color: str) -> None:
+        self._status.setText(text)
+        self._status.setStyleSheet(f"color: {color}; font-size: 12px;")
+
+    def _use_this_folder(self) -> None:
+        self.chosen_path = self._path
+        self.accept()
 
 
 class PeerSyncPanel(QWidget):
@@ -472,6 +637,10 @@ class PeerSyncPanel(QWidget):
         roots_row.addWidget(sync_btn, 0, Qt.AlignmentFlag.AlignBottom)
         self._remote_root = LabelledEntry("Other computer – base folder", placeholder="/home/user")
         roots_row.addWidget(self._remote_root, 1)
+        self._remote_browse_btn = GhostButton("Browse…", root_card, command=self._browse_remote_root)
+        self._remote_browse_btn.setFixedSize(90, 34)
+        self._remote_browse_btn.setEnabled(False)
+        roots_row.addWidget(self._remote_browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
         refresh_btn = GhostButton("⟳ Refresh", root_card, command=self._reload_folders)
         refresh_btn.setFixedSize(100, 34)
         roots_row.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignBottom)
@@ -852,6 +1021,7 @@ class PeerSyncPanel(QWidget):
         self._sync_btn.setEnabled(connected)
         self._fav_sync_btn.setEnabled(connected)
         self._sync_remote_btn.setEnabled(connected)
+        self._remote_browse_btn.setEnabled(connected)
 
     # ==================================================================
     # Folder listing + favourites
@@ -870,6 +1040,16 @@ class PeerSyncPanel(QWidget):
         path = QFileDialog.getExistingDirectory(self, "Select base folder on this computer")
         if path:
             self._local_root.set(path)
+            self._reload_folders()
+
+    def _browse_remote_root(self) -> None:
+        """Pick a base folder on the other computer, its other drives included."""
+        if self._peer is None:
+            QMessageBox.information(self, "Browse", "Connect to the other computer first.")
+            return
+        dlg = RemoteFolderDialog(self, self._peer, self._remote_root_text())
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.chosen_path:
+            self._remote_root.set(dlg.chosen_path)
             self._reload_folders()
 
     def _reload_folders(self) -> None:

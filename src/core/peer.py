@@ -459,6 +459,58 @@ def list_local_folders(path: str) -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Places on the other computer
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PeerPlace:
+    """A browsable location on the other computer (drive, home, filesystem root)."""
+
+    label: str
+    path: str
+    kind: str = "drive"     # "home" | "root" | "drive"
+
+
+# Mount roots that hold removable / extra drives on Linux. Windows mounts get
+# listed too (the drive letters appear as folders under the SFTP root). Plain
+# /media is deliberately excluded - it would list the user's own media folder
+# (/media/<user>) as if it were a drive.
+_DRIVE_ROOTS: Tuple[str, ...] = ("/media/{user}", "/run/media/{user}", "/mnt")
+
+
+def remote_places(peer: "PeerConnection") -> List[PeerPlace]:
+    """Browsable locations on the other computer, drives included.
+
+    Returns its home folder, the filesystem root, and every mounted volume
+    (each folder under /media/<user>, /run/media/<user>, /mnt and /media) so a
+    base folder on another drive can be picked without typing its path.
+    """
+    places: List[PeerPlace] = []
+    seen: set = set()
+
+    def _add(label: str, path: str, kind: str) -> None:
+        norm = path.rstrip("/") or "/"
+        if not norm or norm in seen:
+            return
+        seen.add(norm)
+        places.append(PeerPlace(label=label, path=norm, kind=kind))
+
+    home = (peer.home_dir or "").rstrip("/")
+    username = peer.username or os.path.basename(home)
+    _add("Home folder", home, "home")
+    _add("File system", "/", "root")
+
+    for root in _DRIVE_ROOTS:
+        root_path = root.format(user=username).rstrip("/") or "/"
+        try:
+            for folder in peer.list_folders(root_path):
+                _add(folder["name"], f"{root_path}/{folder['name']}", "drive")
+        except Exception:
+            continue
+    return places
+
+
+# ---------------------------------------------------------------------------
 # Per-folder scan results
 # ---------------------------------------------------------------------------
 
