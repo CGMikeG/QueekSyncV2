@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -424,6 +425,13 @@ class PeerSyncPanel(QWidget):
 
     def __init__(self, app: "QueekSyncApp", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        if app is None:
+            raise ValueError(
+                "PeerSyncPanel needs the QueekSyncApp window: Sync reads "
+                "app.profile_mgr / app.save_profile / app.start_sync. Build it through "
+                "QueekSyncApp() and select the 'peer' page instead of passing None "
+                "(a None app aborts the process later, inside the Sync slot)."
+            )
         self._app = app
         self._peer: Optional[PeerConnection] = None
         self._signals = _PeerSignals()
@@ -462,57 +470,67 @@ class PeerSyncPanel(QWidget):
         header.setStyleSheet(
             f"background-color: {T.BG_PANEL}; border-bottom: 1px solid {T.BORDER};"
         )
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(T.PAD_LG, 0, T.PAD_LG, 0)
-        header_layout.setSpacing(T.PAD_SM)
+        # Two rows: settings on top, actions below. One crowded row needed 1417 px
+        # in the 840 px this panel gets, so every control was squeezed to 82 px and
+        # the 28 px fixed-height buttons clipped their own text.
+        header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        header_col = QVBoxLayout(header)
+        header_col.setContentsMargins(T.PAD_LG, T.PAD_SM, T.PAD_LG, T.PAD_SM)
+        header_col.setSpacing(T.PAD_SM)
 
-        # Settings cluster (left)
-        direction_label = MutedLabel("Sync direction")
-        direction_label.setFixedHeight(28)
-        header_layout.addWidget(direction_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        # ── row 1: sync settings (tooltips carry the full wording) ──────
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(T.PAD_SM)
+        settings_row.addWidget(MutedLabel("Sync direction"), 0, Qt.AlignmentFlag.AlignVCenter)
         self._direction_combo = QComboBox()
         self._direction_combo.addItem("Two-way (automatic)", "auto")
         self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
         self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
-        self._direction_combo.setFixedHeight(28)
-        header_layout.addWidget(self._direction_combo, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._delete_extra_cb = QCheckBox("Delete extra files at destination")
+        self._direction_combo.setMinimumHeight(28)   # let it keep its natural 34 px height
+        settings_row.addWidget(self._direction_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._delete_extra_cb = QCheckBox("Delete extra files")
         self._delete_extra_cb.setEnabled(False)
-        self._delete_extra_cb.setFixedHeight(28)
-        header_layout.addWidget(self._delete_extra_cb, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._copy_missing_cb = QCheckBox("Copy folders that exist on only one side")
+        settings_row.addWidget(self._delete_extra_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._copy_missing_cb = QCheckBox("Copy one-sided folders")
         self._copy_missing_cb.setChecked(True)
-        self._copy_missing_cb.setFixedHeight(28)
-        header_layout.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        settings_row.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        settings_row.addStretch()
+        header_col.addLayout(settings_row)
+
         attach_tooltip(self._direction_combo,
                        "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
                        "copied across. Pick a one-way direction to always copy that way instead.")
         attach_tooltip(self._delete_extra_cb,
-                       "When a one-way direction is chosen, also delete files at the destination that no longer "
-                       "exist in the source (mirror sync). Not available for two-way.")
-        attach_tooltip(self._copy_missing_cb, "Folders checked on one side only are copied to the other side.")
+                       "Delete extra files at the destination: when a one-way direction is chosen, also delete files "
+                       "there that no longer exist in the source (mirror sync). Not available for two-way.")
+        attach_tooltip(self._copy_missing_cb,
+                       "Copy one-sided folders: folders checked on one side only are copied to the other side.")
         self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
 
-        # Action buttons (right)
-        header_layout.addStretch()
-        compare_btn = GhostButton("≋  Compare Selected", header, command=self._compare_selected)
-        compare_btn.setFixedHeight(28)
-        header_layout.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._fav_sync_btn = GhostButton("★  Sync Favourites", header, command=self._sync_favorites)
-        self._fav_sync_btn.setFixedHeight(28)
-        header_layout.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._sync_remote_btn = GhostButton("⇄  Sync Remote List", header, command=self._sync_remote_list)
-        self._sync_remote_btn.setFixedHeight(28)
-        header_layout.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        # ── row 2: actions, right aligned ──────────────────────────────
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(T.PAD_SM)
+        actions_row.addStretch()
+        compare_btn = GhostButton("≋  Compare", header, command=self._compare_selected)
+        actions_row.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._fav_sync_btn = GhostButton("★  Favourites", header, command=self._sync_favorites)
+        actions_row.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sync_remote_btn = GhostButton("⇄  Remote list", header, command=self._sync_remote_list)
+        actions_row.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._sync_btn = PrimaryButton("▶  Sync Selected", header, command=self._sync_selected)
-        self._sync_btn.setFixedHeight(28)
-        header_layout.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        actions_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._activity_btn = GhostButton("◆  Activity", header, command=self._toggle_activity)
+        actions_row.addWidget(self._activity_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_col.addLayout(actions_row)
+
         root.addWidget(header)
 
         attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
         attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
         attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
         attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
+        attach_tooltip(self._activity_btn, "Show or hide the activity window: what the app is doing right now, "
+                                           "with progress and the latest events.")
 
         scroll = ScrollArea(self)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -522,7 +540,7 @@ class PeerSyncPanel(QWidget):
         host_layout.setContentsMargins(T.PAD_LG, T.PAD_MD, T.PAD_LG, T.PAD_LG)
         host_layout.setSpacing(T.PAD_MD)
         scroll.setWidget(host)
-        root.addWidget(scroll)
+        root.addWidget(scroll, 1)   # absorbs the leftover height; the header keeps its size
 
         self._status_lbl = MutedLabel("Connect to the other computer to begin.")
         host_layout.addWidget(self._status_lbl)
@@ -572,7 +590,19 @@ class PeerSyncPanel(QWidget):
 
         self._conn_hint = MutedLabel("")
         saved_layout.addWidget(self._conn_hint)
-        host_layout.addWidget(saved_card)
+        # Collapsible section wrapper: saved connections
+        saved_wrapper = QWidget()
+        saved_wrap_lay = QVBoxLayout(saved_wrapper); saved_wrap_lay.setContentsMargins(0,0,0,0); saved_wrap_lay.setSpacing(0)
+        self._saved_open = True
+        def _toggle_saved():
+            self._saved_open = not self._saved_open
+            saved_card.setVisible(self._saved_open)
+            self._saved_hdr_btn.setText("▼  Saved connections" if self._saved_open else "▶  Saved connections")
+        self._saved_hdr_btn = GhostButton("▼  Saved connections", saved_wrapper, command=_toggle_saved)
+        self._saved_hdr_btn.setFixedHeight(26); self._saved_hdr_btn.setStyleSheet("font-weight:700;")
+        saved_wrap_lay.addWidget(self._saved_hdr_btn)
+        saved_wrap_lay.addWidget(saved_card)
+        host_layout.addWidget(saved_wrapper)
         attach_tooltip(self._conn_list, "Select a saved SSH connection and click Load to connect, "
                                         "or fill in the name and details below and click Save. "
                                         "Click New first to add another connection.")
@@ -615,7 +645,23 @@ class PeerSyncPanel(QWidget):
         self._conn_detail = MutedLabel("")
         conn_row.addWidget(self._conn_detail)
         conn_layout.addLayout(conn_row)
-        host_layout.addWidget(conn_card)
+        # Collapsible wrapper: connection — starts COLLAPSED; button expands (▶→▼)
+        conn_wrapper_actual = QWidget()
+        conn_wrap_lay_actual = QVBoxLayout(conn_wrapper_actual); conn_wrap_lay_actual.setContentsMargins(0,0,0,0); conn_wrap_lay_actual.setSpacing(0)
+        self._conn_open = False
+        conn_card.setVisible(False)
+        def _toggle_conn_actual():
+            self._conn_open = not self._conn_open
+            conn_card.setVisible(self._conn_open)
+            btn_actual.setText("▼  1 · Connect" if self._conn_open else "▶  1 · Connect")
+        btn_actual = GhostButton("▶  1 · Connect", conn_wrapper_actual, command=_toggle_conn_actual)
+        self._conn_hdr_btn = btn_actual
+        btn_actual.setFixedHeight(26); btn_actual.setStyleSheet("font-weight:700;")
+        conn_wrap_lay_actual.addWidget(btn_actual)
+        conn_wrap_lay_actual.addWidget(conn_card)
+        host_layout.addWidget(conn_wrapper_actual)
+
+
 
         # ── 2 · Folder roots & lists ──────────────────────────────────
         root_card = GlassCard(host)
@@ -702,6 +748,36 @@ class PeerSyncPanel(QWidget):
         self._plan_status = MutedLabel("Tick folders on either side, then Compare or Sync.")
         plan_layout.addWidget(self._plan_status)
         host_layout.addWidget(plan_card)
+
+        # Collapsible wrapper: folder lists — starts COLLAPSED; button expands (▶→▼)
+        root_wrapper_actual = QWidget()
+        root_wrap_lay_actual = QVBoxLayout(root_wrapper_actual); root_wrap_lay_actual.setContentsMargins(0,0,0,0); root_wrap_lay_actual.setSpacing(0)
+        self._root_open = False
+        root_card.setVisible(False)
+        def _toggle_root_actual():
+            self._root_open = not self._root_open
+            root_card.setVisible(self._root_open)
+            self._root_hdr_btn.setText("▼  2 · Choose folders to sync" if self._root_open else "▶  2 · Choose folders to sync")
+        self._root_hdr_btn = GhostButton("▶  2 · Choose folders to sync", root_wrapper_actual, command=_toggle_root_actual)
+        self._root_hdr_btn.setFixedHeight(26); self._root_hdr_btn.setStyleSheet("font-weight:700;")
+        root_wrap_lay_actual.addWidget(self._root_hdr_btn)
+        root_wrap_lay_actual.addWidget(root_card)
+        host_layout.addWidget(root_wrapper_actual)
+
+        # Collapsible wrapper: review / sync / plan — starts COLLAPSED; button expands (▶→▼)
+        plan_wrapper_actual = QWidget()
+        plan_wrap_lay_actual = QVBoxLayout(plan_wrapper_actual); plan_wrap_lay_actual.setContentsMargins(0,0,0,0); plan_wrap_lay_actual.setSpacing(0)
+        self._plan_open = False
+        plan_card.setVisible(False)
+        def _toggle_plan_actual():
+            self._plan_open = not self._plan_open
+            plan_card.setVisible(self._plan_open)
+            self._plan_hdr_btn.setText("▼  3 · Review and sync" if self._plan_open else "▶  3 · Review and sync")
+        self._plan_hdr_btn = GhostButton("▶  3 · Review and sync", plan_wrapper_actual, command=_toggle_plan_actual)
+        self._plan_hdr_btn.setFixedHeight(26); self._plan_hdr_btn.setStyleSheet("font-weight:700;")
+        plan_wrap_lay_actual.addWidget(self._plan_hdr_btn)
+        plan_wrap_lay_actual.addWidget(plan_card)
+        host_layout.addWidget(plan_wrapper_actual)
         host_layout.addStretch()
 
         self._set_connected_ui(False)
@@ -743,6 +819,18 @@ class PeerSyncPanel(QWidget):
     # Connection
     # ==================================================================
 
+    def _toggle_activity(self) -> None:
+        """Show/hide the floating activity window."""
+        popup = getattr(self._app, "status_popup", None)
+        if popup is not None:
+            popup.toggle()
+
+    def _report(self, text: str, kind: str = "info", busy: bool = False) -> None:
+        """Tell the activity window what this panel is doing (no-op without an app)."""
+        reporter = getattr(self._app, "report_activity", None)
+        if callable(reporter):
+            reporter(text, kind, busy=busy)
+
     def _connect(self) -> None:
         host = self._host_entry.get().strip()
         user = self._user_entry.get().strip()
@@ -759,6 +847,7 @@ class PeerSyncPanel(QWidget):
         self._connect_btn.setText("Connecting…")
         self._status_lbl.setText(f"Connecting to {user}@{host}:{port} …")
         self._status_lbl.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px;")
+        self._report(f"Connecting to {user}@{host}:{port} …", "info", busy=True)
 
         def _try() -> None:
             peer = PeerConnection(host, port, user, pw)
@@ -978,6 +1067,7 @@ class PeerSyncPanel(QWidget):
         if not ok:
             self._status_lbl.setText(f"Connection failed: {message[:120]}")
             self._status_lbl.setStyleSheet(f"color: {T.ERROR}; font-size: 12px;")
+            self._report(f"Connection failed: {message[:120]}", "error")
             return
 
         self._set_connected_ui(True)
@@ -987,6 +1077,7 @@ class PeerSyncPanel(QWidget):
         self._conn_detail.setText(f"Connected · home: {message}")
         self._status_lbl.setText(f"Connected to {label}.")
         self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
+        self._report(f"Connected to {label}.", "success")
 
         # move the matching saved connection to the top (most recently used)
         match = next(
@@ -1443,6 +1534,7 @@ class PeerSyncPanel(QWidget):
         for plan in plans:
             self._append_plan_row(plan.key, plan.name, "scanning", "scanning", "…", "…")
         self._plan_status.setText(f"Comparing {len(plans)} folder(s) …")
+        self._report(f"Comparing {len(plans)} folder(s) on both computers …", "compare", busy=True)
 
         local_root = self._local_root_text()
         remote_root = self._remote_root_text()
@@ -1606,6 +1698,7 @@ class PeerSyncPanel(QWidget):
         self._sync_checking = True
         self._plan_status.setText("Checking folders before sync …")
         self._plan_status.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        self._report("Checking folders on both computers before syncing …", "compare", busy=True)
         peer = self._peer
 
         def _run() -> None:
@@ -1664,7 +1757,12 @@ class PeerSyncPanel(QWidget):
             self._app.start_sync(profile.id)
             started += 1
         self._plan_status.setStyleSheet("")
-        self._plan_status.setText(f"Started {started} sync job(s). Progress is shown in the Monitor panel.")
+        has_monitor = "monitor" in getattr(self._app, "_panels", {})
+        self._plan_status.setText(
+            f"Started {started} sync job(s)."
+            + (" Progress is shown in the Monitor panel." if has_monitor
+               else " Copying in the background — close or re-run any time.")
+        )
         skipped = ctx.get("skipped") or []
         if skipped:
             self._plan_status.setText(self._plan_status.text() + f"  Skipped: {', '.join(skipped)}")

@@ -32,12 +32,10 @@ from core.syncer import SyncEngine, SyncEvent
 from core.watcher import WatcherManager
 from ui_qt import theme as T
 from ui_qt.sidebar import Sidebar
+from ui_qt.status_popup import StatusPopup
 
 _PAGE_TITLES = {
-    "dashboard": "Dashboard",
     "peer":      "Peer Sync",
-    "profiles":  "Profiles",
-    "monitor":   "Monitor",
     "settings":  "Settings",
 }
 
@@ -136,7 +134,26 @@ class QueekSyncApp(QMainWindow):
 
         root.addWidget(content, 1)
 
-        self.navigate("dashboard")
+        # Floating activity window — replaces the removed Monitor page.
+        self.status_popup = StatusPopup(self)
+
+        self.navigate("peer")  # compact launch: peer + settings only
+
+    # ==================================================================
+    # Activity reporting (floating status window)
+    # ==================================================================
+
+    def report_activity(self, text: str, kind: str = "info", busy: bool = False) -> None:
+        """Say what the app is doing, in the floating activity window."""
+        popup = getattr(self, "status_popup", None)
+        if popup is not None:
+            popup.set_status(text, kind, busy=busy)
+
+    def show_activity(self) -> None:
+        """Bring the activity window up (sidebar / panel button)."""
+        popup = getattr(self, "status_popup", None)
+        if popup is not None:
+            popup.toggle()
 
     # ==================================================================
     # Navigation
@@ -159,15 +176,9 @@ class QueekSyncApp(QMainWindow):
         from ui_qt.profiles_panel import ProfilesPanel
         from ui_qt.settings_panel import SettingsPanel
 
-        if page_id == "dashboard":
-            return DashboardPanel(self)
         if page_id == "peer":
             from ui_qt.peer_panel import PeerSyncPanel
             return PeerSyncPanel(self)
-        if page_id == "profiles":
-            return ProfilesPanel(self)
-        if page_id == "monitor":
-            return MonitorPanel(self)
         if page_id == "settings":
             return SettingsPanel(self)
         return QWidget(self)
@@ -232,7 +243,11 @@ class QueekSyncApp(QMainWindow):
         self._engines[profile_id] = engine
         engine.start(blocking=False)
 
-        self.navigate("monitor")
+        popup = getattr(self, "status_popup", None)
+        if popup is not None:
+            popup.begin_job(profile.name)
+        if "monitor" in _PAGE_TITLES:   # page missing in the trimmed build — stay on Peer Sync
+            self.navigate("monitor")
 
     def start_compare(self, profile_id: str) -> None:
         profile = self.profile_mgr.get(profile_id)
@@ -249,7 +264,11 @@ class QueekSyncApp(QMainWindow):
         engine = SyncEngine(profile, event_cb=_cb, compare_only=True)
         self._engines[profile_id] = engine
         engine.start(blocking=False)
-        self.navigate("monitor")
+        popup = getattr(self, "status_popup", None)
+        if popup is not None:
+            popup.begin_job(profile.name, compare_only=True)
+        if "monitor" in _PAGE_TITLES:   # page missing in the trimmed build — stay on Peer Sync
+            self.navigate("monitor")
 
     def cancel_sync(self, profile_id: str) -> None:
         engine = self._engines.get(profile_id)
@@ -290,6 +309,10 @@ class QueekSyncApp(QMainWindow):
             pass
 
     def _dispatch_event(self, event: SyncEvent) -> None:
+        popup = getattr(self, "status_popup", None)
+        if popup is not None:
+            popup.on_sync_event(event)
+
         if "monitor" in self._panels:
             panel = self._panels["monitor"]
             if hasattr(panel, "on_sync_event"):
