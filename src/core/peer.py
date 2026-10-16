@@ -10,9 +10,13 @@ connection, folder listing, and per-pair status comparison.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
+import shlex
+import shutil
 import stat as stat_mod
+import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -22,6 +26,126 @@ from core.syncer import FileInfo, LocalFS, SFTPFS
 
 
 DEFAULT_EXCLUDES: List[str] = list(FilterConfig().exclude_patterns)
+
+# ---------------------------------------------------------------------------
+# Fast remote listing: one `find` round trip instead of one SFTP listing per
+# directory. The SFTP walk costs a measured 15.6 ms per directory, so a tree
+# with 4,000 folders spent about a minute doing nothing but round trips.
+# ---------------------------------------------------------------------------
+
+_WALK_TEMPLATE = "find {root} -mindepth 1 -printf '%P\t%s\t%T@\t%y\n'"
+_NEWEST_TEMPLATE = (
+    "find {root} {prune}-type f -printf '%T@\t%s\t%P\n' | sort -rn | head -n {limit}"
+)
+
+
+_LOCAL_FIND: Optional[str] = shutil.which("find") if os.name != "nt" else None
+
+
+def _run_local_find(cmd: str, timeout: float = 180.0) -> Optional[str]:
+    """Run a local `find` one-liner. ``None`` = not usable on this machine."""
+    if _LOCAL_FIND is None:
+        return None
+    try:
+        proc = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode == 0:
+        return proc.stdout
+    err = (proc.stderr or "").lower()
+    if "no such file or directory" in err:
+        raise FileNotFoundError(proc.stderr.strip() or "path not found")
+    return None   # no -printf (e.g. BSD/macOS find) or other trouble -> Python walk
+
+
+def _parse_newest(out: str, target: str, exclude: List[str]) -> List[FileInfo]:
+    """Parse `%T@\t%s\t%P` lines into FileInfo, honouring the excludes."""
+    cache: Dict[str, bool] = {}
+    name_cache: Optional[Dict[Tuple[str, bool], bool]] = (
+        {} if not any("/" in p for p in exclude) else None
+    )
+    newest: List[FileInfo] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        mtime, size, rel = parts
+        if not rel:
+            continue
+        if _path_excluded(rel, exclude, [], False, cache, name_cache):
+            continue
+        try:
+            newest.append(FileInfo(f"{target}/{rel}", rel, int(size or 0), float(mtime or 0), False))
+        except ValueError:
+            continue
+    newest.sort(key=lambda f: f.mtime, reverse=True)
+    return newest
+
+
+def _dir_excluded(rel_dir: str, exclude: List[str], cache: Dict[str, bool]) -> bool:
+    """Memoised: is this folder excluded, or inside an excluded folder?
+
+    The SFTP walk never descends into an excluded directory, so a flat `find`
+    listing has to reproduce that or it drags in every file under `venv/` and
+    `__pycache__/` as bogus differences. Memoising per folder keeps the check
+    linear: a tree of 85,000 files holds only a few thousand folders.
+    """
+    if not rel_dir:
+        return False
+    hit = cache.get(rel_dir)
+    if hit is not None:
+        return hit
+    parent, _, name = rel_dir.rpartition("/")
+    if parent and _dir_excluded(parent, exclude, cache):
+        result = True
+    else:
+        result = LocalFS._excluded(name, exclude, [], rel_dir, is_dir=True)
+    cache[rel_dir] = result
+    return result
+
+
+def _path_excluded(
+    rel: str,
+    exclude: List[str],
+    include: List[str],
+    is_dir: bool,
+    cache: Dict[str, bool],
+    name_cache: Optional[Dict[Tuple[str, bool], bool]] = None,
+) -> bool:
+    """True when this entry OR any of its parent folders is excluded.
+
+    ``name_cache`` may be supplied when no pattern is path-qualified: matching
+    then depends on the entry's name and type only, which saves re-running the
+    pattern list for every file (126,000 lines cost ~3s of fnmatch without it).
+    """
+    parent, _, name = rel.rpartition("/")
+    if parent and _dir_excluded(parent, exclude, cache):
+        return True
+    if name_cache is None:
+        return LocalFS._excluded(name, exclude, include, rel, is_dir=is_dir)
+    key = (name, is_dir)
+    hit = name_cache.get(key)
+    if hit is None:
+        hit = LocalFS._excluded(name, exclude, include, rel, is_dir=is_dir)
+        name_cache[key] = hit
+    return hit
+
+
+def _find_prune_clause(patterns: List[str]) -> str:
+    """Turn folder excludes into a `find` prelude that skips whole trees.
+
+    Only plain name patterns can be handed to `find -name`; anything with a
+    path separator is filtered in Python afterwards instead.
+    """
+    parts = []
+    for pat in patterns:
+        pat = (pat or "").strip()
+        if not pat or "/" in pat or "\\" in pat:
+            continue
+        parts.append("-name " + shlex.quote(pat))
+    if not parts:
+        return ""
+    return f"\\( {' -o '.join(parts)} \\) -prune -o "
 
 # ---------------------------------------------------------------------------
 # Content-type classification (used by the pre-sync safety check so the user
@@ -408,6 +532,7 @@ class PeerConnection:
         self._ssh = None
         self._sftp = None
         self.home_dir: str = ""
+        self._find_ok: Optional[bool] = None   # does the other side have a usable `find`?
 
     # ------------------------------------------------------------------
 
@@ -462,6 +587,105 @@ class PeerConnection:
         self._sftp = None
         self._ssh = None
         self.home_dir = ""
+
+    # ------------------------------------------------------------------
+    # Fast remote listing (one round trip for a whole tree)
+    # ------------------------------------------------------------------
+
+    def exec_capture(self, cmd: str, timeout: float = 180.0) -> Tuple[str, str, int]:
+        """Run a shell command on the other computer: (stdout, stderr, exit code)."""
+        if self._ssh is None:
+            raise RuntimeError("Not connected to the other computer.")
+        _stdin, stdout, stderr = self._ssh.exec_command(cmd, timeout=timeout)
+        out = stdout.read().decode("utf-8", "replace")
+        err = stderr.read().decode("utf-8", "replace")
+        return out, err, stdout.channel.recv_exit_status()
+
+    def _run_find(self, cmd: str) -> Optional[str]:
+        """Run a `find` one-liner, returning its stdout.
+
+        ``None`` means the other computer cannot run it (no ``find``, or a
+        version without ``-printf``) so the caller should fall back to the slow
+        SFTP walk. Raises FileNotFoundError when the target path is gone.
+        """
+        out, err, status = self.exec_capture(cmd)
+        if status == 0:
+            self._find_ok = True
+            return out
+        low = err.lower()
+        if "no such file or directory" in low:
+            self._find_ok = True
+            raise FileNotFoundError(err.strip() or "path not found")
+        if "-printf" in low or "unknown predicate" in low or "not found" in low:
+            self._find_ok = False
+            return None
+        return None
+
+    def walk_files_fast(
+        self,
+        root: str,
+        exclude: Optional[List[str]] = None,
+        include: Optional[List[str]] = None,
+    ) -> Optional[List[FileInfo]]:
+        """List a whole remote tree in ONE round trip. ``None`` = unsupported."""
+        if self._ssh is None or self._sftp is None or self._find_ok is False:
+            return None
+        target = root.rstrip("/") or "/"
+        out = self._run_find(_WALK_TEMPLATE.format(root=shlex.quote(target)))
+        if out is None:
+            return None
+
+        excl = exclude if exclude is not None else DEFAULT_EXCLUDES
+        include_patterns = include or []
+        cache: Dict[str, bool] = {}
+        # Path-qualified patterns ("docs/**") make the decision depend on the
+        # entry's full path, so only cache by name when there are none.
+        name_cache: Optional[Dict[Tuple[str, bool], bool]] = (
+            {} if not any("/" in p for p in list(excl) + include_patterns) else None
+        )
+        folders: List[FileInfo] = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 4:
+                continue
+            rel, size, mtime, kind = parts
+            if not rel:
+                continue
+            is_dir = kind == "d"
+            if _path_excluded(rel, excl, include_patterns, is_dir, cache, name_cache):
+                continue
+            try:
+                folders.append(FileInfo(f"{target}/{rel}", rel, int(size or 0), float(mtime or 0), is_dir))
+            except ValueError:
+                continue
+        return folders
+
+    def newest_files_fast(
+        self,
+        root: str,
+        limit: int = 10,
+        exclude: Optional[List[str]] = None,
+    ) -> Optional[List[FileInfo]]:
+        """The ``limit`` most recently modified files, in ONE round trip.
+
+        The remote side does the sorting (`find ... | sort -rn | head`), so this
+        never depends on how many files the folder holds. ``None`` = unsupported
+        (fall back to a full scan); raises FileNotFoundError when the path is gone.
+        """
+        if self._ssh is None or self._sftp is None or self._find_ok is False:
+            return None
+        target = root.rstrip("/") or "/"
+        excl = exclude if exclude is not None else DEFAULT_EXCLUDES
+        out = self._run_find(
+            _NEWEST_TEMPLATE.format(
+                root=shlex.quote(target),
+                prune=_find_prune_clause(excl),
+                limit=max(1, int(limit)),
+            )
+        )
+        if out is None:
+            return None
+        return _parse_newest(out, target, excl)
 
     # ------------------------------------------------------------------
 
@@ -588,6 +812,7 @@ class FolderScan:
     error: str = ""
     missing: bool = False     # folder does not exist on that side
     contents: Dict[str, int] = field(default_factory=dict)  # category -> count
+    latest_name: str = ""     # rel path of the newest file (shown by compare)
 
     def summary_line(self) -> str:
         if self.missing:
@@ -613,7 +838,8 @@ class FolderScan:
 
 def _summarize(name: str, path: str, files: List[FileInfo]) -> FolderScan:
     files_only = [f for f in files if not f.is_dir]
-    latest = max((f.mtime for f in files_only), default=0.0)
+    newest = max(files_only, key=lambda f: f.mtime, default=None)
+    latest = newest.mtime if newest is not None else 0.0
     total = sum(f.size for f in files_only)
     contents: Dict[str, int] = {}
     for f in files_only:
@@ -626,6 +852,7 @@ def _summarize(name: str, path: str, files: List[FileInfo]) -> FolderScan:
         latest_mtime=latest,
         total_size=total,
         contents=contents,
+        latest_name=newest.rel_path if newest is not None else "",
     )
 
 
@@ -641,7 +868,21 @@ def _scan_local_files(path: str, exclude: Optional[List[str]]) -> Tuple[List[Fil
 
 
 def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[str]]) -> Tuple[List[FileInfo], str, bool]:
-    """Scan a remote folder over the peer's SFTP connection. Returns (files, error, missing)."""
+    """Scan a remote folder. Returns (files, error, missing).
+
+    Prefers a single `find` round trip (see ``PeerConnection.walk_files_fast``)
+    and falls back to walking the tree one SFTP listing at a time when the other
+    computer cannot run it.
+    """
+    excl = exclude if exclude is not None else DEFAULT_EXCLUDES
+    try:
+        fast = peer.walk_files_fast(path, excl)
+        if fast is not None:
+            return fast, "", False
+    except FileNotFoundError:
+        return [], "", True
+    except Exception:
+        pass   # unsupported/failed -> slow path below
     fs = SFTPFS(
         peer.host,
         peer.port,
@@ -724,6 +965,140 @@ def compare_pair(
 
 
 # ---------------------------------------------------------------------------
+# Quick compare: the newest few files only
+# ---------------------------------------------------------------------------
+
+QUICK_COMPARE_LIMIT = 10   # how many newest files each side contributes
+
+
+def _newest_local_files(
+    path: str, limit: int, exclude: List[str]
+) -> Tuple[List[FileInfo], str, bool]:
+    """The ``limit`` newest local files: (files, error, missing).
+
+    A local `find` answers this in a fraction of the time a full Python walk
+    needs (0.2 s versus 2.5 s for 53,000 files), and the walk is the fallback
+    for machines without a GNU `find`.
+    """
+    target = path.rstrip("/") or "/"
+    if _LOCAL_FIND is not None:
+        try:
+            out = _run_local_find(
+                _NEWEST_TEMPLATE.format(
+                    root=shlex.quote(target),
+                    prune=_find_prune_clause(exclude),
+                    limit=max(1, int(limit)),
+                )
+            )
+            if out is not None:
+                return _parse_newest(out, target, exclude), "", False
+        except FileNotFoundError:
+            return [], "", True
+        except Exception:
+            pass   # fall through to the Python walk
+    try:
+        files = [f for f in LocalFS.scan(path, [], exclude) if not f.is_dir]
+    except FileNotFoundError:
+        return [], "", True
+    except Exception as exc:
+        return [], str(exc), False
+    return heapq.nlargest(limit, files, key=lambda f: f.mtime), "", False
+
+
+def quick_compare(
+    peer: PeerConnection,
+    local_path: str,
+    remote_path: str,
+    name: str,
+    limit: int = QUICK_COMPARE_LIMIT,
+    exclude: Optional[List[str]] = None,
+) -> PairCompare:
+    """Compare only the newest ``limit`` files on each side.
+
+    Answers "which computer holds the newer work?" without walking either tree
+    completely: the other computer's newest files arrive in one round trip
+    (`find ... | sort -rn | head`) and the local side comes from a local walk.
+    ``PairCompare.quick`` marks the result, because the file counts describe the
+    sample, not the folder total.
+
+    Only files present on BOTH sides are scored: a file that merely missed the
+    other side's newest-N sample says nothing about the folder as a whole, and
+    counting those produced bogus "mixed"/"local_newer" verdicts on folders that
+    were simply much larger on one side. Sample files that exist on one side
+    only are still reported (``only_local_names`` / ``only_remote_names``).
+    """
+    excl = exclude if exclude is not None else DEFAULT_EXCLUDES
+
+    local_files, local_error, local_missing = _newest_local_files(local_path, limit, excl)
+
+    remote_files: List[FileInfo] = []
+    remote_error = ""
+    remote_missing = False
+    try:
+        fast = peer.newest_files_fast(remote_path, limit, excl)
+    except FileNotFoundError:
+        fast, remote_missing = None, True
+    except Exception as exc:
+        fast, remote_error = None, str(exc)
+    if fast is not None:
+        remote_files = fast
+    elif not (remote_missing or remote_error):
+        # No usable `find` over there: fall back to a full scan, then keep the newest.
+        scanned, remote_error, remote_missing = _scan_remote_files(peer, remote_path, excl)
+        if not (remote_error or remote_missing):
+            remote_files = heapq.nlargest(limit, [f for f in scanned if not f.is_dir],
+                                          key=lambda f: f.mtime)
+
+    local = FolderScan(name=name, path=local_path)
+    if local_missing:
+        local.missing = True
+    elif local_error:
+        local.error = local_error
+    else:
+        local = _summarize(name, local_path, local_files)
+
+    remote = FolderScan(name=name, path=remote_path)
+    if remote_missing:
+        remote.missing = True
+    elif remote_error:
+        remote.error = remote_error
+    else:
+        remote = _summarize(name, remote_path, remote_files)
+
+    cmp = compare_folders(name, local, remote)
+    cmp.quick = True
+    cmp.quick_limit = limit
+    if not (local.error or local.missing or remote.error or remote.missing):
+        local_names = {f.rel_path for f in local_files}
+        remote_names = {f.rel_path for f in remote_files}
+        shared = local_names & remote_names
+        shared_local = [f for f in local_files if f.rel_path in shared]
+        shared_remote = [f for f in remote_files if f.rel_path in shared]
+        (
+            cmp.local_newer_files,
+            cmp.remote_newer_files,
+            cmp.same_files,
+            _only_local,
+            _only_remote,
+        ) = diff_file_maps(shared_local, shared_remote)
+        # Report the one-sided sample files without letting them decide the
+        # verdict (see the docstring): a bigger folder would always "win".
+        cmp.only_local_names = sorted(local_names - shared)
+        cmp.only_remote_names = sorted(remote_names - shared)
+        cmp.only_local_files = 0
+        cmp.only_remote_files = 0
+        if not shared:
+            # Nothing overlapping to compare: the newest file decides.
+            if local.latest_mtime > remote.latest_mtime + 2:
+                cmp.local_newer_files = 1
+            elif remote.latest_mtime > local.latest_mtime + 2:
+                cmp.remote_newer_files = 1
+            else:
+                cmp.same_files = 1
+    return cmp
+
+
+# ---------------------------------------------------------------------------
 # Pair comparison (which side is newer?)
 # ---------------------------------------------------------------------------
 
@@ -741,6 +1116,8 @@ class PairCompare:
     only_remote_files: int = 0
     only_local_names: List[str] = field(default_factory=list)   # rel paths
     only_remote_names: List[str] = field(default_factory=list)  # rel paths
+    quick: bool = False          # quick compare: the newest files only
+    quick_limit: int = 0         # how many newest files each side contributed
 
     # ------------------------------------------------------------------
 

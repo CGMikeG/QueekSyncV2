@@ -50,6 +50,8 @@ from core.peer import (
     add_remote_favorite,
     add_to_sync_list,
     compare_pair,
+    QUICK_COMPARE_LIMIT,
+    quick_compare,
     delete_peer_connection,
     find_or_create_peer_profile,
     list_local_folders,
@@ -513,6 +515,8 @@ class PeerSyncPanel(QWidget):
         actions_row.addStretch()
         compare_btn = GhostButton("≋  Compare", header, command=self._compare_selected)
         actions_row.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._quick_btn = GhostButton("»  Quick compare", header, command=self._quick_compare_selected)
+        actions_row.addWidget(self._quick_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._fav_sync_btn = GhostButton("★  Favourites", header, command=self._sync_favorites)
         actions_row.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         self._sync_remote_btn = GhostButton("⇄  Remote list", header, command=self._sync_remote_list)
@@ -526,6 +530,10 @@ class PeerSyncPanel(QWidget):
         root.addWidget(header)
 
         attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
+        attach_tooltip(self._quick_btn,
+                       f"Quick compare: check only the newest {QUICK_COMPARE_LIMIT} files in each folder instead of every file, "
+                       "so a big folder answers 'which computer has the newer work?' in about a second. "
+                       "Use the full Compare for a file-by-file verdict.")
         attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
         attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
         attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
@@ -825,8 +833,20 @@ class PeerSyncPanel(QWidget):
         if popup is not None:
             popup.toggle()
 
-    def _report(self, text: str, kind: str = "info", busy: bool = False) -> None:
-        """Tell the activity window what this panel is doing (no-op without an app)."""
+    def _report(self, text: str, kind: str = "info", busy: bool = False,
+                done: Optional[bool] = None) -> None:
+        """Tell the activity window what this panel is doing (no-op without an app).
+
+        ``done`` closes the running job (True/False = succeeded/failed). Panel-driven
+        compares go through this, so without it the window sits on "Running…" for
+        ever — only engine events would ever finish a job.
+        """
+        popup = getattr(self._app, "status_popup", None)
+        if popup is None:
+            return
+        if done is not None:
+            popup.finish(done, text)
+            return
         reporter = getattr(self._app, "report_activity", None)
         if callable(reporter):
             reporter(text, kind, busy=busy)
@@ -1524,6 +1544,14 @@ class PeerSyncPanel(QWidget):
     # ==================================================================
 
     def _compare_selected(self) -> None:
+        """Full compare: every file in every selected folder."""
+        self._run_compare(quick=False)
+
+    def _quick_compare_selected(self) -> None:
+        """Quick compare: only the newest few files per folder (fast verdict)."""
+        self._run_compare(quick=True)
+
+    def _run_compare(self, quick: bool) -> None:
         if self._peer is None:
             return
         plans = self._selected_plans()
@@ -1533,20 +1561,27 @@ class PeerSyncPanel(QWidget):
         self._plan_table.setRowCount(0)
         for plan in plans:
             self._append_plan_row(plan.key, plan.name, "scanning", "scanning", "…", "…")
-        self._plan_status.setText(f"Comparing {len(plans)} folder(s) …")
-        self._report(f"Comparing {len(plans)} folder(s) on both computers …", "compare", busy=True)
+
+        scope = f"newest {QUICK_COMPARE_LIMIT} file(s) per folder" if quick else "every file"
+        what = "Quick comparison" if quick else "Comparison"
+        self._plan_status.setText(f"{what} of {len(plans)} folder(s) — {scope} …")
+        self._report(f"{what} of {len(plans)} folder(s) — {scope} …", "compare", busy=True)
 
         local_root = self._local_root_text()
         remote_root = self._remote_root_text()
 
         def _run() -> None:
             for idx, plan in enumerate(plans, start=1):
-                self._signals.compare_row.emit(plan.key, "local", f"Scanning {idx}/{len(plans)} …")
+                self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(plans)} …")
                 local_path = plan.local_path or os.path.join(local_root, plan.name)
                 remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
-                cmp = compare_pair(self._peer, local_path, remote_path, plan.name)
+                if quick:
+                    cmp = quick_compare(self._peer, local_path, remote_path, plan.name,
+                                        QUICK_COMPARE_LIMIT)
+                else:
+                    cmp = compare_pair(self._peer, local_path, remote_path, plan.name)
                 self._signals.pair_compared.emit(plan.key, cmp)
-            self._signals.sync_done.emit(True, f"Compare finished for {len(plans)} folder(s).")
+            self._signals.sync_done.emit(True, f"{what} finished for {len(plans)} folder(s).")
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1563,14 +1598,26 @@ class PeerSyncPanel(QWidget):
         row = self._row_for_key(key)
         if row is None:
             return
-        local_txt = cmp.local.summary_line() if (cmp.local.error or cmp.local.missing) else (
-            f"{cmp.local.file_count} file(s) · {_human_size(cmp.local.total_size)}\n"
-            f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}"
-        )
-        remote_txt = cmp.remote.summary_line() if (cmp.remote.error or cmp.remote.missing) else (
-            f"{cmp.remote.file_count} file(s) · {_human_size(cmp.remote.total_size)}\n"
-            f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
-        )
+        if cmp.quick:
+            # The sample is the folder's newest files, so show those by name
+            # instead of a file count/size that would describe only the sample.
+            local_txt = (f"newest {cmp.quick_limit}: {cmp.local.latest_name or '—'}\n"
+                         f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}")
+            remote_txt = (f"newest {cmp.quick_limit}: {cmp.remote.latest_name or '—'}\n"
+                          f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}")
+            if cmp.local.error or cmp.local.missing:
+                local_txt = cmp.local.summary_line()
+            if cmp.remote.error or cmp.remote.missing:
+                remote_txt = cmp.remote.summary_line()
+        else:
+            local_txt = cmp.local.summary_line() if (cmp.local.error or cmp.local.missing) else (
+                f"{cmp.local.file_count} file(s) · {_human_size(cmp.local.total_size)}\n"
+                f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}"
+            )
+            remote_txt = cmp.remote.summary_line() if (cmp.remote.error or cmp.remote.missing) else (
+                f"{cmp.remote.file_count} file(s) · {_human_size(cmp.remote.total_size)}\n"
+                f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
+            )
         self._set_cell(row, 1, local_txt)
         self._set_cell(row, 2, remote_txt)
         verdict_txt = _VERDICT_LABELS.get(cmp.verdict, cmp.verdict)
@@ -1592,6 +1639,8 @@ class PeerSyncPanel(QWidget):
             verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.local.latest_mtime)}"
         elif cmp.verdict == "only_remote" and cmp.remote.latest_mtime:
             verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
+        if cmp.quick:
+            verdict_txt += f"\nquick check · newest {cmp.quick_limit}"
         self._set_verdict_cell(row, 3, verdict_txt, verdict_color)
         self._set_cell(row, 4, cmp.sync_action)
 
@@ -1770,6 +1819,7 @@ class PeerSyncPanel(QWidget):
     def _on_sync_done(self, ok: bool, message: str) -> None:
         self._plan_status.setText(message)
         self._plan_status.setStyleSheet(f"color: {T.SUCCESS if ok else T.ERROR}; font-size: 12px;")
+        self._report(message, done=ok)   # close the activity window's running job
 
     # ==================================================================
     # Plan table helpers
