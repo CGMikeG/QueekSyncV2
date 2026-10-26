@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import threading
 from datetime import datetime
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
@@ -33,7 +33,9 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -74,6 +76,7 @@ from ui_qt import theme as T
 from ui_qt.widgets import (
     GhostButton,
     GlassCard,
+    IconButton,
     LabelledEntry,
     MutedLabel,
     PrimaryButton,
@@ -133,6 +136,16 @@ def _fmt_mtime(mtime: float) -> str:
     if not mtime:
         return "never"
     return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_mtime_short(mtime: float) -> str:
+    """Compact date for table cells: '26 Oct 16:24', with the year only when needed."""
+    if not mtime:
+        return "never"
+    when = datetime.fromtimestamp(mtime)
+    if when.year == datetime.now().year:
+        return when.strftime("%d %b %H:%M")
+    return when.strftime("%d %b %Y")
 
 
 def _human_size(num: int) -> str:
@@ -422,6 +435,56 @@ class RemoteFolderDialog(QDialog):
         self.accept()
 
 
+# The three steps the panel walks through, in order.
+_STEPS: List[Tuple[str, str]] = [
+    ("connect", "Connect"),
+    ("folders", "Folders"),
+    ("review", "Compare && sync"),   # && = a literal ampersand in Qt labels
+]
+
+
+class StepChip(QPushButton):
+    """A step in the panel's header: number + label, three states.
+
+    Painted by the stylesheet rather than with icons, and left-aligned so the
+    three chips read as a sequence: idle (muted), current (highlighted), done
+    (green tick once that step has been completed).
+    """
+
+    def __init__(self, number: str, label: str, parent: Optional[QWidget] = None,
+                 command: Optional[Callable] = None) -> None:
+        super().__init__(parent)
+        self._number = number
+        self._label = label
+        self._state = "idle"
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(26)
+        if command is not None:
+            self.clicked.connect(command)
+        self._restyle()
+
+    def set_state(self, state: str) -> None:
+        self._state = state
+        self._restyle()
+
+    def _restyle(self) -> None:
+        if self._state == "done":
+            self.setText(f"✓  {self._label}")
+            color, bg, border = T.SUCCESS, f"{T.SUCCESS}22", f"{T.SUCCESS}55"
+        elif self._state == "current":
+            self.setText(f"{self._number}  {self._label}")
+            color, bg, border = T.TEXT, T.BG_HOVER, T.BORDER_BRIGHT
+        else:
+            self.setText(f"{self._number}  {self._label}")
+            color, bg, border = T.TEXT_MUTED, "transparent", T.BORDER
+        self.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 2px 10px; border-radius: 7px;"
+            f" color: {color}; background-color: {bg}; border: 1px solid {border};"
+            f" font-size: 12px; font-weight: 600; }}"
+            f"QPushButton:hover {{ background-color: {T.BG_HOVER}; color: {T.TEXT}; }}"
+        )
+
+
 class PeerSyncPanel(QWidget):
     """Side-by-side folder selection and sync between two computers."""
 
@@ -465,163 +528,119 @@ class PeerSyncPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # All sync controls + action buttons pinned in a single header row so
-        # they stay visible and vertically aligned while the connection /
-        # folder / plan sections scroll below.
-        header = QWidget(self)
-        header.setStyleSheet(
+        # ── step bar: 1 Connect › 2 Folders › 3 Compare & sync ──────────
+        # One compact strip replaces the four collapsible section headers and
+        # carries the connection status, so the important line never scrolls
+        # away and the steps read as a sequence instead of four loose cards.
+        stepbar = QWidget(self)
+        stepbar.setStyleSheet(
             f"background-color: {T.BG_PANEL}; border-bottom: 1px solid {T.BORDER};"
         )
-        # Two rows: settings on top, actions below. One crowded row needed 1417 px
-        # in the 840 px this panel gets, so every control was squeezed to 82 px and
-        # the 28 px fixed-height buttons clipped their own text.
-        header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        header_col = QVBoxLayout(header)
-        header_col.setContentsMargins(T.PAD_LG, T.PAD_SM, T.PAD_LG, T.PAD_SM)
-        header_col.setSpacing(T.PAD_SM)
+        stepbar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        step_row = QHBoxLayout(stepbar)
+        step_row.setContentsMargins(T.PAD_LG, T.PAD_SM, T.PAD_LG, T.PAD_SM)
+        step_row.setSpacing(T.PAD_SM)
 
-        # ── row 1: sync settings (tooltips carry the full wording) ──────
-        settings_row = QHBoxLayout()
-        settings_row.setSpacing(T.PAD_SM)
-        settings_row.addWidget(MutedLabel("Sync direction"), 0, Qt.AlignmentFlag.AlignVCenter)
-        self._direction_combo = QComboBox()
-        self._direction_combo.addItem("Two-way (automatic)", "auto")
-        self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
-        self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
-        self._direction_combo.setMinimumHeight(28)   # let it keep its natural 34 px height
-        settings_row.addWidget(self._direction_combo, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._delete_extra_cb = QCheckBox("Delete extra files")
-        self._delete_extra_cb.setEnabled(False)
-        settings_row.addWidget(self._delete_extra_cb, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._copy_missing_cb = QCheckBox("Copy one-sided folders")
-        self._copy_missing_cb.setChecked(True)
-        settings_row.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
-        settings_row.addStretch()
-        header_col.addLayout(settings_row)
+        self._step_chips: Dict[str, StepChip] = {}
+        for idx, (key, label) in enumerate(_STEPS):
+            if idx:
+                sep = QLabel("›")
+                sep.setStyleSheet(f"color: {T.TEXT_DIM}; font-size: 13px; border: none;")
+                step_row.addWidget(sep, 0, Qt.AlignmentFlag.AlignVCenter)
+            # clicked(bool) passes `checked` into the handler: the leading `_` must
+            # be there or it silently overwrites the captured step key.
+            chip = StepChip(str(idx + 1), label, stepbar,
+                            command=lambda _=False, k=key: self._toggle_step(k))
+            step_row.addWidget(chip, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._step_chips[key] = chip
 
-        attach_tooltip(self._direction_combo,
-                       "Two-way (automatic): folders on both computers sync both ways, folders on one side only are "
-                       "copied across. Pick a one-way direction to always copy that way instead.")
-        attach_tooltip(self._delete_extra_cb,
-                       "Delete extra files at the destination: when a one-way direction is chosen, also delete files "
-                       "there that no longer exist in the source (mirror sync). Not available for two-way.")
-        attach_tooltip(self._copy_missing_cb,
-                       "Copy one-sided folders: folders checked on one side only are copied to the other side.")
-        self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
-
-        # ── row 2: actions, right aligned ──────────────────────────────
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(T.PAD_SM)
-        actions_row.addStretch()
-        compare_btn = GhostButton("≋  Compare", header, command=self._compare_selected)
-        actions_row.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._quick_btn = GhostButton("»  Quick compare", header, command=self._quick_compare_selected)
-        actions_row.addWidget(self._quick_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._fav_sync_btn = GhostButton("★  Favourites", header, command=self._sync_favorites)
-        actions_row.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._sync_remote_btn = GhostButton("⇄  Remote list", header, command=self._sync_remote_list)
-        actions_row.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._sync_btn = PrimaryButton("▶  Sync Selected", header, command=self._sync_selected)
-        actions_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._activity_btn = GhostButton("◆  Activity", header, command=self._toggle_activity)
-        actions_row.addWidget(self._activity_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        header_col.addLayout(actions_row)
-
-        root.addWidget(header)
-
-        attach_tooltip(compare_btn, "Scan the selected folders on both computers, show which side is newer, and report the date/time each folder's content was last updated.")
-        attach_tooltip(self._quick_btn,
-                       f"Quick compare: check only the newest {QUICK_COMPARE_LIMIT} files in each folder instead of every file, "
-                       "so a big folder answers 'which computer has the newer work?' in about a second. "
-                       "Use the full Compare for a file-by-file verdict.")
-        attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
-        attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
-        attach_tooltip(self._sync_remote_btn, "Download the other computer's sync list and sync those folders.")
-        attach_tooltip(self._activity_btn, "Show or hide the activity window: what the app is doing right now, "
-                                           "with progress and the latest events.")
-
-        scroll = ScrollArea(self)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        host = QWidget()
-        host_layout = QVBoxLayout(host)
-        host_layout.setContentsMargins(T.PAD_LG, T.PAD_MD, T.PAD_LG, T.PAD_LG)
-        host_layout.setSpacing(T.PAD_MD)
-        scroll.setWidget(host)
-        root.addWidget(scroll, 1)   # absorbs the leftover height; the header keeps its size
-
+        step_row.addStretch()
         self._status_lbl = MutedLabel("Connect to the other computer to begin.")
-        host_layout.addWidget(self._status_lbl)
+        step_row.addWidget(self._status_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._activity_btn = GhostButton("◆  Activity", stepbar, command=self._toggle_activity)
+        step_row.addWidget(self._activity_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        attach_tooltip(self._activity_btn,
+                       "Show or hide the activity log pinned at the bottom of the window: "
+                       "what the app is doing now, with progress and recent events.")
+        root.addWidget(stepbar)
 
-        # ── Saved connections panel ────────────────────────────────────
-        saved_card = GlassCard(host)
-        saved_layout = QVBoxLayout(saved_card)
-        saved_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
-        saved_layout.setSpacing(T.PAD_SM)
-        saved_layout.addWidget(SectionLabel("Saved connections"))
+        # A vertical splitter rather than a scroll area: the folder list and the
+        # results table share the height, and the divider between them can be
+        # dragged. Its handle stays visible (the styled 7 px bar) so it is findable.
+        self._splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self._splitter.setObjectName("StepSplitter")
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(7)
+        self._splitter.setStyleSheet(
+            f"QSplitter#StepSplitter {{ background-color: {T.BG_ROOT}; }}"
+            f"QSplitter#StepSplitter::handle {{ background-color: {T.BG_PANEL}; }}"
+            f"QSplitter#StepSplitter::handle:hover {{ background-color: {T.ACCENT}; }}"
+            f"QSplitter#StepSplitter::handle:pressed {{ background-color: {T.ACCENT_HOVER}; }}"
+        )
+        self._splitter.setContentsMargins(T.PAD_LG, T.PAD_MD, T.PAD_LG, T.PAD_LG)
+        host = self          # cards are reparented into the splitter below
+        root.addWidget(self._splitter, 1)   # absorbs the leftover height
 
-        self._conn_list = QListWidget()
+        # ── step 1 · Connect — saved connections beside the form ───────
+        conn_card = GlassCard(host)
+        conn_layout = QVBoxLayout(conn_card)
+        conn_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
+        conn_layout.setSpacing(T.PAD_SM)
+
+        conn_cols = QHBoxLayout()
+        conn_cols.setSpacing(T.PAD_LG)
+
+        saved_col = QVBoxLayout()
+        saved_col.setSpacing(6)
+        saved_col.addWidget(SectionLabel("Saved connections"))
+        self._conn_list = QListWidget(conn_card)
         self._conn_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self._conn_list.setMinimumHeight(96)
-        self._conn_list.setMaximumHeight(180)
+        self._conn_list.setMinimumHeight(84)
+        self._conn_list.setMaximumHeight(96)      # was a 300 px panel of its own
         self._conn_list.currentRowChanged.connect(self._on_conn_selected)
         self._conn_list.itemDoubleClicked.connect(self._load_connection)
         self._conn_list.setStyleSheet(
             f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; padding: 4px; }}"
-            f"QListWidget::item {{ padding: 6px 8px; border-radius: 4px; }}"
+            f"QListWidget::item {{ padding: 5px 8px; border-radius: 4px; }}"
             f"QListWidget::item:selected {{ background-color: {T.BG_HOVER};"
             f" border: 1px solid {T.ACCENT}; }}"
         )
-        saved_layout.addWidget(self._conn_list)
+        saved_col.addWidget(self._conn_list)
+        attach_tooltip(self._conn_list,
+                       "Select a saved SSH connection and click Load to connect, or fill in the "
+                       "details on the right and click Save. Click New first to add another.")
 
         saved_btn_row = QHBoxLayout()
-        self._load_conn_btn = PrimaryButton("Load", saved_card, command=self._load_connection)
+        saved_btn_row.setSpacing(6)
+        self._load_conn_btn = PrimaryButton("Load", conn_card, command=self._load_connection)
         saved_btn_row.addWidget(self._load_conn_btn)
-        new_conn_btn = GhostButton("New", saved_card, command=self._new_connection)
+        new_conn_btn = GhostButton("New", conn_card, command=self._new_connection)
         saved_btn_row.addWidget(new_conn_btn)
-        save_conn_btn = GhostButton("Save", saved_card, command=self._save_connection)
+        save_conn_btn = GhostButton("Save", conn_card, command=self._save_connection)
         saved_btn_row.addWidget(save_conn_btn)
-        self._rename_conn_btn = GhostButton("Rename", saved_card, command=self._rename_connection)
+        self._rename_conn_btn = GhostButton("Rename", conn_card, command=self._rename_connection)
         saved_btn_row.addWidget(self._rename_conn_btn)
-        self._delete_conn_btn = GhostButton("Delete", saved_card, command=self._delete_connection)
+        self._delete_conn_btn = GhostButton("Delete", conn_card, command=self._delete_connection)
         saved_btn_row.addWidget(self._delete_conn_btn)
         saved_btn_row.addStretch()
-        saved_layout.addLayout(saved_btn_row)
+        saved_col.addLayout(saved_btn_row)
         attach_tooltip(new_conn_btn,
                        "Start a new connection: clears the fields so the next Save adds a separate "
                        "connection instead of updating the selected one.")
         attach_tooltip(save_conn_btn,
-                       "Save the name and details above. A new name adds a connection; keeping the "
-                       "loaded connection's name updates it.")
+                       "Save the name and details. A new name adds a connection; keeping the loaded "
+                       "connection's name updates it.")
         attach_tooltip(self._rename_conn_btn, "Rename the selected saved connection.")
-
         self._conn_hint = MutedLabel("")
-        saved_layout.addWidget(self._conn_hint)
-        # Collapsible section wrapper: saved connections
-        saved_wrapper = QWidget()
-        saved_wrap_lay = QVBoxLayout(saved_wrapper); saved_wrap_lay.setContentsMargins(0,0,0,0); saved_wrap_lay.setSpacing(0)
-        self._saved_open = True
-        def _toggle_saved():
-            self._saved_open = not self._saved_open
-            saved_card.setVisible(self._saved_open)
-            self._saved_hdr_btn.setText("▼  Saved connections" if self._saved_open else "▶  Saved connections")
-        self._saved_hdr_btn = GhostButton("▼  Saved connections", saved_wrapper, command=_toggle_saved)
-        self._saved_hdr_btn.setFixedHeight(26); self._saved_hdr_btn.setStyleSheet("font-weight:700;")
-        saved_wrap_lay.addWidget(self._saved_hdr_btn)
-        saved_wrap_lay.addWidget(saved_card)
-        host_layout.addWidget(saved_wrapper)
-        attach_tooltip(self._conn_list, "Select a saved SSH connection and click Load to connect, "
-                                        "or fill in the name and details below and click Save. "
-                                        "Click New first to add another connection.")
+        self._conn_hint.setWordWrap(True)
+        saved_col.addWidget(self._conn_hint)
+        saved_col.addStretch()
+        conn_cols.addLayout(saved_col, 2)
 
-        # ── 1 · Connection ────────────────────────────────────────────
-        conn_card = GlassCard(host)
-        conn_layout = QVBoxLayout(conn_card)
-        conn_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
-        conn_layout.setSpacing(T.PAD_SM)
-        conn_layout.addWidget(SectionLabel("1 · Connect to the other computer"))
-
+        form_col = QVBoxLayout()
+        form_col.setSpacing(T.PAD_SM)
+        form_col.addWidget(SectionLabel("Connection details"))
         grid = QGridLayout()
         grid.setHorizontalSpacing(T.PAD_SM)
         grid.setVerticalSpacing(T.PAD_SM)
@@ -636,14 +655,15 @@ class PeerSyncPanel(QWidget):
         grid.addWidget(self._port_entry, 1, 1)
         grid.addWidget(self._user_entry, 2, 0)
         grid.addWidget(self._pass_entry, 2, 1)
-        conn_layout.addLayout(grid)
+        form_col.addLayout(grid)
 
         conn_row = QHBoxLayout()
         self._remember_cb = QCheckBox("Remember password")
         self._remember_cb.setChecked(True)
         conn_row.addWidget(self._remember_cb)
-        attach_tooltip(self._remember_cb, "Store the password with the saved connection. Stored in plaintext in the "
-                                         "app config folder, like SFTP profile passwords.")
+        attach_tooltip(self._remember_cb,
+                       "Store the password with the saved connection. Stored in plaintext in the "
+                       "app config folder, like SFTP profile passwords.")
         self._connect_btn = PrimaryButton("Connect", conn_card, command=self._connect)
         conn_row.addWidget(self._connect_btn)
         self._disconnect_btn = GhostButton("Disconnect", conn_card, command=self._disconnect)
@@ -652,144 +672,215 @@ class PeerSyncPanel(QWidget):
         conn_row.addStretch()
         self._conn_detail = MutedLabel("")
         conn_row.addWidget(self._conn_detail)
-        conn_layout.addLayout(conn_row)
-        # Collapsible wrapper: connection — starts COLLAPSED; button expands (▶→▼)
-        conn_wrapper_actual = QWidget()
-        conn_wrap_lay_actual = QVBoxLayout(conn_wrapper_actual); conn_wrap_lay_actual.setContentsMargins(0,0,0,0); conn_wrap_lay_actual.setSpacing(0)
-        self._conn_open = False
-        conn_card.setVisible(False)
-        def _toggle_conn_actual():
-            self._conn_open = not self._conn_open
-            conn_card.setVisible(self._conn_open)
-            btn_actual.setText("▼  1 · Connect" if self._conn_open else "▶  1 · Connect")
-        btn_actual = GhostButton("▶  1 · Connect", conn_wrapper_actual, command=_toggle_conn_actual)
-        self._conn_hdr_btn = btn_actual
-        btn_actual.setFixedHeight(26); btn_actual.setStyleSheet("font-weight:700;")
-        conn_wrap_lay_actual.addWidget(btn_actual)
-        conn_wrap_lay_actual.addWidget(conn_card)
-        host_layout.addWidget(conn_wrapper_actual)
+        form_col.addLayout(conn_row)
+        form_col.addStretch()
+        conn_cols.addLayout(form_col, 3)
 
+        conn_layout.addLayout(conn_cols)   # (added to the splitter below)
 
-
-        # ── 2 · Folder roots & lists ──────────────────────────────────
+        # ── step 2 · Folders — both computers side by side ─────────────
         root_card = GlassCard(host)
         root_layout = QVBoxLayout(root_card)
         root_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
         root_layout.setSpacing(T.PAD_SM)
-        root_layout.addWidget(SectionLabel("2 · Choose folders to sync"))
 
         roots_row = QHBoxLayout()
-        self._local_root = LabelledEntry("This computer – base folder", placeholder=str(os.path.expanduser("~")))
+        roots_row.setSpacing(T.PAD_SM)
+        self._local_root = LabelledEntry("This computer – base folder",
+                                        placeholder=str(os.path.expanduser("~")))
         self._local_root.set(os.path.expanduser("~"))
         roots_row.addWidget(self._local_root, 1)
         browse_btn = GhostButton("Browse…", root_card, command=self._browse_local_root)
         browse_btn.setFixedSize(90, 34)
         roots_row.addWidget(browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
-        fav_btn = GhostButton("★  Favourite", root_card, command=self._toggle_favorite)
-        fav_btn.setFixedSize(100, 34)
+        fav_btn = IconButton("★", root_card, command=self._toggle_favorite)
         roots_row.addWidget(fav_btn, 0, Qt.AlignmentFlag.AlignBottom)
-        sync_btn = GhostButton("⇄  Sync List", root_card, command=self._toggle_sync_list)
-        sync_btn.setFixedSize(100, 34)
-        roots_row.addWidget(sync_btn, 0, Qt.AlignmentFlag.AlignBottom)
+        sync_list_btn = IconButton("⇄", root_card, command=self._toggle_sync_list)
+        roots_row.addWidget(sync_list_btn, 0, Qt.AlignmentFlag.AlignBottom)
         self._remote_root = LabelledEntry("Other computer – base folder", placeholder="/home/user")
         roots_row.addWidget(self._remote_root, 1)
         self._remote_browse_btn = GhostButton("Browse…", root_card, command=self._browse_remote_root)
         self._remote_browse_btn.setFixedSize(90, 34)
         self._remote_browse_btn.setEnabled(False)
         roots_row.addWidget(self._remote_browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
-        refresh_btn = GhostButton("⟳ Refresh", root_card, command=self._reload_folders)
-        refresh_btn.setFixedSize(100, 34)
+        refresh_btn = IconButton("⟳", root_card, command=self._reload_folders)
         roots_row.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignBottom)
         root_layout.addLayout(roots_row)
-        attach_tooltip(fav_btn, "Add (or remove) the base folder shown above as a favourite. "
+        attach_tooltip(fav_btn, "Add (or remove) this computer's base folder as a favourite. "
                                "The other computer sees it when it connects.")
-        attach_tooltip(sync_btn, "Add (or remove) the base folder shown above to your sync list. "
-                                "The other computer can then sync it with one click.")
+        attach_tooltip(sync_list_btn, "Add (or remove) this computer's base folder to the sync list. "
+                                     "The other computer can then sync it with one click.")
+        attach_tooltip(refresh_btn, "Re-read both folder lists from disk.")
 
         lists_row = QHBoxLayout()
         lists_row.setSpacing(T.PAD_MD)
         self._local_list, self._local_header = self._make_folder_list(
-            "Folders on this computer  (★ favourite · ⇄ sync list)", lists_row)
+            "This PC  (★ favourite · ⇄ sync list)", lists_row)
         self._remote_list, self._remote_header = self._make_folder_list(
-            "Folders on the other computer  (★ favourite · ⇄ sync list)", lists_row)
+            "Other PC  (★ favourite · ⇄ sync list)", lists_row)
         root_layout.addLayout(lists_row, 1)
-        host_layout.addWidget(root_card)
 
-        # ── 3 · Plan / compare / sync ─────────────────────────────────
+        # ── step 3 · Compare & sync ────────────────────────────────────
         plan_card = GlassCard(host)
         plan_layout = QVBoxLayout(plan_card)
         plan_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
         plan_layout.setSpacing(T.PAD_SM)
-        plan_layout.addWidget(SectionLabel("3 · Review and sync"))
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(T.PAD_SM)
+        compare_btn = GhostButton("≋  Compare", plan_card, command=self._compare_selected)
+        actions_row.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._quick_btn = GhostButton("»  Quick compare", plan_card,
+                                      command=self._quick_compare_selected)
+        actions_row.addWidget(self._quick_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._fav_sync_btn = GhostButton("★  Favourites", plan_card, command=self._sync_favorites)
+        actions_row.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sync_remote_btn = GhostButton("⇄  Remote list", plan_card,
+                                            command=self._sync_remote_list)
+        actions_row.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        actions_row.addStretch()
+        self._sync_btn = PrimaryButton("▶  Sync selected", plan_card, command=self._sync_selected)
+        actions_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        plan_layout.addLayout(actions_row)
+
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(T.PAD_SM)
+        settings_label = MutedLabel("Sync direction")
+        settings_row.addWidget(settings_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._direction_combo = QComboBox(plan_card)
+        self._direction_combo.addItem("Two-way (automatic)", "auto")
+        self._direction_combo.addItem("This PC → Other PC", "local_to_remote")
+        self._direction_combo.addItem("Other PC → This PC", "remote_to_local")
+        settings_row.addWidget(self._direction_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._delete_extra_cb = QCheckBox("Delete extra files")
+        self._delete_extra_cb.setEnabled(False)
+        settings_row.addWidget(self._delete_extra_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._copy_missing_cb = QCheckBox("Copy one-sided folders")
+        self._copy_missing_cb.setChecked(True)
+        settings_row.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        settings_row.addStretch()
+        plan_layout.addLayout(settings_row)
+
+        attach_tooltip(compare_btn,
+                       "Scan the selected folders on both computers, show which side is newer, and "
+                       "report the date/time each folder's content was last updated.")
+        attach_tooltip(self._quick_btn,
+                       f"Quick compare: check only the newest {QUICK_COMPARE_LIMIT} files in each "
+                       "folder instead of every file, so a big folder answers 'which computer has "
+                       "the newer work?' in about a second. Use Compare for a file-by-file verdict.")
+        attach_tooltip(self._sync_btn, "Sync the selected folder pairs (two-way when both sides exist).")
+        attach_tooltip(self._fav_sync_btn, "Select every favourite folder on both computers and sync them.")
+        attach_tooltip(self._sync_remote_btn,
+                       "Download the other computer's sync list and sync those folders.")
+        attach_tooltip(self._direction_combo,
+                       "Two-way (automatic): folders on both computers sync both ways, folders on one "
+                       "side only are copied across. Pick a one-way direction to always copy that way.")
+        attach_tooltip(self._delete_extra_cb,
+                       "Delete extra files at the destination: when a one-way direction is chosen, also "
+                       "delete files there that no longer exist in the source (mirror sync).")
+        attach_tooltip(self._copy_missing_cb,
+                       "Copy one-sided folders: folders checked on one side only are copied across.")
+        self._direction_combo.currentIndexChanged.connect(self._update_direction_ui)
 
         self._plan_table = QTableWidget(0, 5)
         self._plan_table.setHorizontalHeaderLabels(
-            ["Folder", "This PC", "Other PC", "Newer side", "Action"]
+            ["Folder", "This PC newest", "Other PC newest", "Verdict", "Action"]
         )
         self._plan_table.verticalHeader().setVisible(False)
-        # Rows must grow to fit multi-line cells (e.g. "…\nLast updated: …");
-        # the default Interactive mode keeps every row at 30px and clips the
-        # second line, hiding the dates/times.
-        _vh = self._plan_table.verticalHeader()
-        assert _vh is not None
-        _vh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._plan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._plan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        header = self._plan_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self._plan_table.setMinimumHeight(160)
-        self._plan_table.setMaximumHeight(260)
+        plan_header = self._plan_table.horizontalHeader()
+        plan_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        plan_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        plan_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        plan_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        plan_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self._plan_table.setMinimumHeight(88)   # draggable: the splitter sets the height
         self._plan_table.setStyleSheet(
             f"QTableWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; gridline-color: {T.BORDER}; }}"
             f"QHeaderView::section {{ background-color: {T.BG_CARD}; color: {T.TEXT_MUTED};"
             f" border: none; padding: 6px; font-weight: 600; }}"
-            f"QTableWidget::item {{ padding: 4px 8px; }}"
+            f"QTableWidget::item {{ padding: 5px 8px; }}"
             f"QTableWidget::item:selected {{ background-color: {T.BG_HOVER}; }}"
         )
-        plan_layout.addWidget(self._plan_table)
+        plan_layout.addWidget(self._plan_table, 1)
 
         self._plan_status = MutedLabel("Tick folders on either side, then Compare or Sync.")
         plan_layout.addWidget(self._plan_status)
-        host_layout.addWidget(plan_card)
 
-        # Collapsible wrapper: folder lists — starts COLLAPSED; button expands (▶→▼)
-        root_wrapper_actual = QWidget()
-        root_wrap_lay_actual = QVBoxLayout(root_wrapper_actual); root_wrap_lay_actual.setContentsMargins(0,0,0,0); root_wrap_lay_actual.setSpacing(0)
-        self._root_open = False
-        root_card.setVisible(False)
-        def _toggle_root_actual():
-            self._root_open = not self._root_open
-            root_card.setVisible(self._root_open)
-            self._root_hdr_btn.setText("▼  2 · Choose folders to sync" if self._root_open else "▶  2 · Choose folders to sync")
-        self._root_hdr_btn = GhostButton("▶  2 · Choose folders to sync", root_wrapper_actual, command=_toggle_root_actual)
-        self._root_hdr_btn.setFixedHeight(26); self._root_hdr_btn.setStyleSheet("font-weight:700;")
-        root_wrap_lay_actual.addWidget(self._root_hdr_btn)
-        root_wrap_lay_actual.addWidget(root_card)
-        host_layout.addWidget(root_wrapper_actual)
+        # Steps can stay open together (folders + results is the working view), so the
+        # window fills with content instead of one card stretched over a big void.
+        # Only the folder lists and the results table grow; the form is fixed content.
+        self._step_cards = {"connect": conn_card, "folders": root_card, "review": plan_card}
+        for key, card in self._step_cards.items():
+            # GlassCard reports a Minimum vertical policy, so Qt used its sizeHint
+            # (e.g. 332 px) as the splitter floor and left no room to drag. An
+            # explicit floor plus Expanding gives the divider real travel.
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+            # floors keep every card's own controls visible: the form is fixed
+            # content, the results card needs its action + settings + status rows
+            card.setMinimumHeight({"connect": 270, "folders": 130, "review": 240}[key])
+            self._splitter.addWidget(card)
+        # the form keeps its natural height; the two working cards share the rest
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 1)
+        self._splitter.setSizes([210, 330, 330])
 
-        # Collapsible wrapper: review / sync / plan — starts COLLAPSED; button expands (▶→▼)
-        plan_wrapper_actual = QWidget()
-        plan_wrap_lay_actual = QVBoxLayout(plan_wrapper_actual); plan_wrap_lay_actual.setContentsMargins(0,0,0,0); plan_wrap_lay_actual.setSpacing(0)
-        self._plan_open = False
-        plan_card.setVisible(False)
-        def _toggle_plan_actual():
-            self._plan_open = not self._plan_open
-            plan_card.setVisible(self._plan_open)
-            self._plan_hdr_btn.setText("▼  3 · Review and sync" if self._plan_open else "▶  3 · Review and sync")
-        self._plan_hdr_btn = GhostButton("▶  3 · Review and sync", plan_wrapper_actual, command=_toggle_plan_actual)
-        self._plan_hdr_btn.setFixedHeight(26); self._plan_hdr_btn.setStyleSheet("font-weight:700;")
-        plan_wrap_lay_actual.addWidget(self._plan_hdr_btn)
-        plan_wrap_lay_actual.addWidget(plan_card)
-        host_layout.addWidget(plan_wrapper_actual)
-        host_layout.addStretch()
-
+        self._open_steps: set = {"connect", "folders"}   # shows the flow at launch
+        self._apply_steps()
         self._set_connected_ui(False)
         self._populate_connections()
+
+        # Show this computer's folders straight away — they need no connection — and
+        # let the other side's list say why it is empty until you connect.
+        try:
+            self._folders["local"] = list_local_folders(self._local_root_text())
+        except Exception:
+            self._folders["local"] = []
+        self._render_lists()
+
+    # ==================================================================
+    # Step bar (accordion)
+    # ==================================================================
+
+    def _toggle_step(self, key: str) -> None:
+        """Show or hide one step; the others keep their state."""
+        if key in self._open_steps:
+            self._open_steps.discard(key)
+        else:
+            self._open_steps.add(key)
+        self._apply_steps()
+
+    def _open_step_now(self, key: str) -> None:
+        """Reveal a step without hiding the rest (used when the flow advances).
+
+        Once connected the connect card is finished with, so advancing past it
+        puts it away — otherwise three cards stack up and the panel scrolls.
+        """
+        if self._peer is not None and key != "connect":
+            self._open_steps.discard("connect")
+        self._open_steps.add(key)
+        self._apply_steps()
+
+    def _show_only_step(self, *keys: str) -> None:
+        """Replace the visible steps (e.g. connect collapses once connected)."""
+        self._open_steps = set(keys)
+        self._apply_steps()
+
+    def _apply_steps(self) -> None:
+        """Show every open step and colour the chips to match."""
+        connected = self._peer is not None
+        for key, card in self._step_cards.items():
+            card.setVisible(key in self._open_steps)
+        for key, chip in self._step_chips.items():
+            if key in self._open_steps:
+                chip.set_state("current")
+            elif key == "connect" and connected:
+                chip.set_state("done")
+            else:
+                chip.set_state("idle")
 
     def _make_folder_list(self, title: str, parent_layout: QHBoxLayout) -> tuple:
         col = QWidget()
@@ -805,8 +896,7 @@ class PeerSyncPanel(QWidget):
 
         lst = QListWidget()
         lst.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        lst.setMinimumHeight(220)
-        lst.setMaximumHeight(320)
+        lst.setMinimumHeight(88)    # a small floor only: the splitter decides the rest
         lst.itemChanged.connect(self._on_item_changed)
         lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lst.customContextMenuRequested.connect(self._on_list_context_menu)
@@ -1092,12 +1182,12 @@ class PeerSyncPanel(QWidget):
 
         self._set_connected_ui(True)
         label = f"{self._peer.username}@{self._peer.host}:{self._peer.port}"
-        self._remote_header.setText(f"Folders on the other computer ({label})  (★ favourite · ⇄ sync list)")
+        self._remote_header.setText(f"Other PC  {self._peer.host}  (★ favourite · ⇄ sync list)")
         self._remote_root.set(message)
         self._conn_detail.setText(f"Connected · home: {message}")
         self._status_lbl.setText(f"Connected to {label}.")
         self._status_lbl.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
-        self._report(f"Connected to {label}.", "success")
+        self._report(f"Connected to {label}.", "connected")
 
         # move the matching saved connection to the top (most recently used)
         match = next(
@@ -1108,6 +1198,7 @@ class PeerSyncPanel(QWidget):
         if match is not None and self._connections and self._connections[0].name != match.name:
             touch_peer_connection(match.name)
             self._populate_connections()
+        self._show_only_step("folders", "review")   # connected: the working view
         self._reload_folders()
 
     def _disconnect(self) -> None:
@@ -1202,8 +1293,13 @@ class PeerSyncPanel(QWidget):
                     remote_folders = self._peer.list_folders(remote_path)
                 except Exception as exc:
                     remote_err = str(exc)
-                remote_favs = read_remote_favorites(self._peer)
-                remote_sync = read_remote_sync_list(self._peer)
+                # these read the OTHER computer's files over SFTP: a failure here
+                # must not kill the loader thread and leave the lists blank for ever
+                try:
+                    remote_favs = read_remote_favorites(self._peer)
+                    remote_sync = read_remote_sync_list(self._peer)
+                except Exception as exc:      # noqa: BLE001
+                    remote_err = remote_err or f"could not read favourites: {exc}"
             self._signals.folders_loaded.emit("remote", remote_folders if not remote_err else [])
             self._signals.favorites_loaded.emit("remote", remote_favs)
             self._signals.sync_list_loaded.emit("remote", remote_sync)
@@ -1252,6 +1348,17 @@ class PeerSyncPanel(QWidget):
         self._render_list(self._local_list, "local")
         self._render_list(self._remote_list, "remote")
 
+    def _render_placeholder(self, lst: QListWidget, side: str) -> None:
+        """One muted, non-selectable line so an empty list explains itself."""
+        text = ("Connect to the other computer to load its folders."
+                if side == "remote" and self._peer is None
+                else "No folders here — check the base folder, or click ⟳.")
+        item = QListWidgetItem(text)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)          # not selectable / not tickable
+        item.setForeground(QColor(T.TEXT_DIM))
+        item.setData(_R_KIND, "placeholder")
+        lst.addItem(item)
+
     def _render_list(self, lst: QListWidget, side: str) -> None:
         root = self._local_root_text() if side == "local" else self._remote_root_text()
         favs = self._favs.get(side) or []
@@ -1298,6 +1405,8 @@ class PeerSyncPanel(QWidget):
                 item.setForeground(QColor(T.ACCENT2))
                 item.setToolTip(path + "\nOn the other computer's sync list.")
             lst.addItem(item)
+        if not rows:
+            self._render_placeholder(lst, side)   # never leave a blank box
         lst.blockSignals(False)
 
     # ==================================================================
@@ -1327,6 +1436,8 @@ class PeerSyncPanel(QWidget):
                     continue
                 name = item.data(_R_NAME)
                 path = item.data(_R_PATH)
+                if not name or not path:
+                    continue   # placeholder / stale row: it cannot describe a folder
                 plan = plans.setdefault(name, PeerPlan(name=name, key=name))
                 if side == "local":
                     plan.local_checked = True
@@ -1561,6 +1672,7 @@ class PeerSyncPanel(QWidget):
         self._plan_table.setRowCount(0)
         for plan in plans:
             self._append_plan_row(plan.key, plan.name, "scanning", "scanning", "…", "…")
+        self._open_step_now("review")
 
         scope = f"newest {QUICK_COMPARE_LIMIT} file(s) per folder" if quick else "every file"
         what = "Quick comparison" if quick else "Comparison"
@@ -1571,16 +1683,22 @@ class PeerSyncPanel(QWidget):
         remote_root = self._remote_root_text()
 
         def _run() -> None:
-            for idx, plan in enumerate(plans, start=1):
-                self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(plans)} …")
-                local_path = plan.local_path or os.path.join(local_root, plan.name)
-                remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
-                if quick:
-                    cmp = quick_compare(self._peer, local_path, remote_path, plan.name,
-                                        QUICK_COMPARE_LIMIT)
-                else:
-                    cmp = compare_pair(self._peer, local_path, remote_path, plan.name)
-                self._signals.pair_compared.emit(plan.key, cmp)
+            # A traceback inside a worker thread used to vanish, leaving the table
+            # stuck on "Checking …" — which the user reads as a frozen/crashed app.
+            try:
+                for idx, plan in enumerate(plans, start=1):
+                    self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(plans)} …")
+                    local_path = plan.local_path or os.path.join(local_root, plan.name)
+                    remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
+                    if quick:
+                        cmp = quick_compare(self._peer, local_path, remote_path, plan.name,
+                                            QUICK_COMPARE_LIMIT)
+                    else:
+                        cmp = compare_pair(self._peer, local_path, remote_path, plan.name)
+                    self._signals.pair_compared.emit(plan.key, cmp)
+            except Exception as exc:      # noqa: BLE001
+                self._signals.sync_done.emit(False, f"{what} failed: {exc}")
+                return
             self._signals.sync_done.emit(True, f"{what} finished for {len(plans)} folder(s).")
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1598,49 +1716,42 @@ class PeerSyncPanel(QWidget):
         row = self._row_for_key(key)
         if row is None:
             return
-        if cmp.quick:
-            # The sample is the folder's newest files, so show those by name
-            # instead of a file count/size that would describe only the sample.
-            local_txt = (f"newest {cmp.quick_limit}: {cmp.local.latest_name or '—'}\n"
-                         f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}")
-            remote_txt = (f"newest {cmp.quick_limit}: {cmp.remote.latest_name or '—'}\n"
-                          f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}")
-            if cmp.local.error or cmp.local.missing:
-                local_txt = cmp.local.summary_line()
-            if cmp.remote.error or cmp.remote.missing:
-                remote_txt = cmp.remote.summary_line()
-        else:
-            local_txt = cmp.local.summary_line() if (cmp.local.error or cmp.local.missing) else (
-                f"{cmp.local.file_count} file(s) · {_human_size(cmp.local.total_size)}\n"
-                f"Last updated: {_fmt_mtime(cmp.local.latest_mtime)}"
-            )
-            remote_txt = cmp.remote.summary_line() if (cmp.remote.error or cmp.remote.missing) else (
-                f"{cmp.remote.file_count} file(s) · {_human_size(cmp.remote.total_size)}\n"
-                f"Last updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
-            )
+        def _side_text(side, quick: bool) -> str:
+            """One line: when that side last changed, and what changed last."""
+            if side.error or side.missing:
+                return side.summary_line()
+            when = _fmt_mtime_short(side.latest_mtime)
+            if quick:
+                return f"{when}  ·  {side.latest_name or '—'}"
+            return f"{when}  ·  {side.file_count} files, {_human_size(side.total_size)}"
+
+        def _side_tooltip(side) -> str:
+            if side.error or side.missing:
+                return side.summary_line()
+            return (f"Last updated: {_fmt_mtime(side.latest_mtime)}\n"
+                    f"Newest file: {side.latest_name or '—'}\n"
+                    f"{side.file_count:,} files · {_human_size(side.total_size)}")
+
+        local_txt = _side_text(cmp.local, cmp.quick)
+        remote_txt = _side_text(cmp.remote, cmp.quick)
         self._set_cell(row, 1, local_txt)
         self._set_cell(row, 2, remote_txt)
+        for col, tip in ((1, _side_tooltip(cmp.local)), (2, _side_tooltip(cmp.remote))):
+            cell_item = self._plan_table.item(row, col)
+            if cell_item is not None:
+                cell_item.setToolTip(tip)   # the cell elides; the tooltip keeps it all
         verdict_txt = _VERDICT_LABELS.get(cmp.verdict, cmp.verdict)
         verdict_color = _VERDICT_COLORS.get(cmp.verdict, T.TEXT)
-        # Always report the date/time the folder content was last updated,
-        # and which side holds it when that is meaningful.
-        when = _fmt_mtime(cmp.newest_mtime)
+        # The two date columns already say when each side changed, so the verdict
+        # only names the side (colour-coded) — repeating the date here used to
+        # squeeze the file-path columns into ellipses.
         newest_side = cmp.newest_side
         if newest_side == "local" and cmp.newest_mtime:
-            verdict_txt += f"\nLast updated: this PC · {when}"
             verdict_color = T.ACCENT
         elif newest_side == "remote" and cmp.newest_mtime:
-            verdict_txt += f"\nLast updated: other PC · {when}"
             verdict_color = T.ACCENT2
-        elif newest_side == "tie" and cmp.newest_mtime:
-            # Both sides updated within 2s of each other — one shared time.
-            verdict_txt += f"\nLast updated: {when}"
-        elif cmp.verdict == "only_local" and cmp.local.latest_mtime:
-            verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.local.latest_mtime)}"
-        elif cmp.verdict == "only_remote" and cmp.remote.latest_mtime:
-            verdict_txt += f"\nLast updated: {_fmt_mtime(cmp.remote.latest_mtime)}"
         if cmp.quick:
-            verdict_txt += f"\nquick check · newest {cmp.quick_limit}"
+            verdict_txt += f"  ·  quick {cmp.quick_limit}"   # short: the columns carry the rest
         self._set_verdict_cell(row, 3, verdict_txt, verdict_color)
         self._set_cell(row, 4, cmp.sync_action)
 
@@ -1752,11 +1863,16 @@ class PeerSyncPanel(QWidget):
 
         def _run() -> None:
             results: List[Tuple[PeerPlan, PairCompare]] = []
-            for idx, plan in enumerate(to_run, start=1):
-                self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(to_run)} …")
-                local_path = plan.local_path or os.path.join(local_root, plan.name)
-                remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
-                results.append((plan, compare_pair(peer, local_path, remote_path, plan.name)))
+            try:
+                for idx, plan in enumerate(to_run, start=1):
+                    self._signals.compare_row.emit(plan.key, "local", f"Checking {idx}/{len(to_run)} …")
+                    local_path = plan.local_path or os.path.join(local_root, plan.name)
+                    remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
+                    results.append((plan, compare_pair(peer, local_path, remote_path, plan.name)))
+            except Exception as exc:      # noqa: BLE001
+                self._sync_checking = False
+                self._signals.sync_done.emit(False, f"Pre-sync check failed: {exc}")
+                return
             self._signals.safety_checked.emit(results, ctx)
 
         threading.Thread(target=_run, daemon=True).start()

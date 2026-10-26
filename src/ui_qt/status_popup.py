@@ -164,9 +164,16 @@ class StatusPopup(QFrame):
             self._counts[kind] += 1
         self._append(text, kind)
         self._set_action(text, kind)
-        if progress is not None and progress > 0:
+        if kind in ("success", "error", "connected"):
+            # a settled status (e.g. "Connected to …") must not leave the marquee
+            # or the "Running…" badge behind
+            self._badge.set_status(kind)
+            self._paint_bar(T.ERROR if kind == "error" else T.SUCCESS)
+            self._bar.set_determinate(1.0)
+        elif progress is not None and progress > 0:
             self._bar.set_determinate(min(progress, 1.0))
         elif busy:
+            self._paint_bar(T.ACCENT)
             self._bar.start_indeterminate()
         if busy:
             self._badge.set_status("running")

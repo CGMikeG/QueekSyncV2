@@ -17,6 +17,7 @@ import shlex
 import shutil
 import stat as stat_mod
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -295,7 +296,7 @@ def read_remote_sync_list(peer: "PeerConnection") -> List[str]:
     """Read the other computer's sync-list folders over SFTP (empty if none)."""
     try:
         remote_path = f"{peer.home_dir.rstrip('/')}/{SYNC_LIST_FILE_NAME}"
-        with peer.sftp.open(remote_path, "r") as fh:
+        with peer.sftp_lock, peer.sftp.open(remote_path, "r") as fh:
             data = json.load(fh)
         folders = data.get("folders", []) if isinstance(data, dict) else []
         return [f for f in folders if isinstance(f, str)]
@@ -439,7 +440,7 @@ def read_remote_favorites(peer: "PeerConnection") -> List[str]:
     """Read the other computer's favourite folders over SFTP (empty if none)."""
     try:
         remote_path = f"{peer.home_dir.rstrip('/')}/{FAVORITES_FILE_NAME}"
-        with peer.sftp.open(remote_path, "r") as fh:
+        with peer.sftp_lock, peer.sftp.open(remote_path, "r") as fh:
             data = json.load(fh)
         favs = data.get("favorites", []) if isinstance(data, dict) else []
         return [f for f in favs if isinstance(f, str)]
@@ -465,17 +466,18 @@ def write_remote_favorites(peer: "PeerConnection", paths: List[str]) -> None:
         raise RuntimeError("Not connected to the other computer.")
     cleaned = sorted({_remote_norm(p) for p in paths if p})
     payload = json.dumps({"version": 1, "favorites": cleaned}, indent=2)
-    with peer.sftp.open(tmp_path, "w") as fh:
-        fh.write(payload)
-    try:
-        peer.sftp.posix_rename(tmp_path, remote_path)
-    except IOError:
-        # Server without the POSIX rename extension: remove then rename.
+    with peer.sftp_lock:          # one channel: writes must not race a listing
+        with peer.sftp.open(tmp_path, "w") as fh:
+            fh.write(payload)
         try:
-            peer.sftp.remove(remote_path)
+            peer.sftp.posix_rename(tmp_path, remote_path)
         except IOError:
-            pass
-        peer.sftp.rename(tmp_path, remote_path)
+            # Server without the POSIX rename extension: remove then rename.
+            try:
+                peer.sftp.remove(remote_path)
+            except IOError:
+                pass
+            peer.sftp.rename(tmp_path, remote_path)
 
 
 def add_remote_favorite(peer: "PeerConnection", path: str) -> bool:
@@ -533,6 +535,10 @@ class PeerConnection:
         self._sftp = None
         self.home_dir: str = ""
         self._find_ok: Optional[bool] = None   # does the other side have a usable `find`?
+        # paramiko's SFTPClient is NOT thread-safe and one request pair in flight
+        # can block for ever when two threads share it. Every use of this channel
+        # must hold this lock (measured: 4 overlapping listdir calls = deadlock).
+        self._sftp_lock = threading.RLock()
 
     # ------------------------------------------------------------------
 
@@ -544,6 +550,11 @@ class PeerConnection:
     def sftp(self):
         """The live paramiko SFTP client (owned by this connection)."""
         return self._sftp
+
+    @property
+    def sftp_lock(self) -> "threading.RLock":
+        """Re-entrant lock guarding ``sftp`` — hold it around every channel call."""
+        return self._sftp_lock
 
     def connect(self) -> str:
         """Open the SSH/SFTP connection. Returns the remote home directory."""
@@ -560,7 +571,19 @@ class PeerConnection:
             timeout=10,
         )
         self._ssh = client
-        self._sftp = client.open_sftp()
+        with self._sftp_lock:
+            self._sftp = client.open_sftp()
+        # A dead channel used to block a reader for ever (the UI froze instead of
+        # reporting an error); a timeout turns that into a normal exception.
+        try:
+            channel = self._sftp.get_channel()
+            if channel is not None:
+                channel.settimeout(30.0)
+            transport = client.get_transport()
+            if transport is not None:
+                transport.set_keepalive(15)
+        except Exception:
+            pass
 
         home = ""
         try:
@@ -576,7 +599,8 @@ class PeerConnection:
     def disconnect(self) -> None:
         if self._sftp is not None:
             try:
-                self._sftp.close()
+                with self._sftp_lock:
+                    self._sftp.close()
             except Exception:
                 pass
         if self._ssh is not None:
@@ -696,7 +720,8 @@ class PeerConnection:
         Raises FileNotFoundError when the remote path does not exist.
         """
         folders: List[dict] = []
-        entries = self._sftp.listdir_attr(path)
+        with self._sftp_lock:
+            entries = self._sftp.listdir_attr(path)
         for attr in entries:
             if stat_mod.S_ISDIR(attr.st_mode):
                 folders.append(
@@ -892,7 +917,8 @@ def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[s
         sftp=peer.sftp,
     )
     try:
-        files = fs.scan(path, [], exclude if exclude is not None else DEFAULT_EXCLUDES)
+        with peer.sftp_lock:      # the shared channel: never walk it concurrently
+            files = fs.scan(path, [], exclude if exclude is not None else DEFAULT_EXCLUDES)
         return files, "", False
     except FileNotFoundError:
         return [], "", True

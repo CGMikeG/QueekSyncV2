@@ -61,6 +61,7 @@ CARD_GAP   = 14
 
 STATUS_COLORS = {
     "never":     TEXT_DIM,
+    "connected": SUCCESS,
     "success":   SUCCESS,
     "error":     ERROR,
     "running":   ACCENT,
@@ -69,6 +70,7 @@ STATUS_COLORS = {
 
 STATUS_BG = {
     "never":     "#3d4450",
+    "connected": "#14532d",
     "success":   "#14532d",
     "error":     "#450a0a",
     "running":   "#1e3a5f",
@@ -77,6 +79,7 @@ STATUS_BG = {
 
 STATUS_LABELS = {
     "never":     "Never synced",
+    "connected": "Connected",
     "success":   "Last sync OK",
     "error":     "Sync error",
     "running":   "Running…",

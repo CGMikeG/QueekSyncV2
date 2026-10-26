@@ -18,6 +18,10 @@ def main() -> None:
     from PyQt6.QtWidgets import QApplication
 
     from ui_qt.app import QueekSyncApp
+    from ui_qt.crash_log import install_crash_log
+
+    crash_log = install_crash_log()   # next crash leaves a traceback, not just a vanished window
+    print(f"QueekSync: crash log -> {crash_log}", flush=True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("QueekSync")

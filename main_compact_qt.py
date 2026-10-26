@@ -24,11 +24,15 @@ def main() -> None:
     from ui_qt.app import QueekSyncApp
     from ui_qt.theme import build_qss
 
+    from ui_qt.crash_log import install_crash_log
+    crash_log = install_crash_log()   # next crash leaves a traceback, not just a vanished window
+
     app = QApplication(sys.argv)
     app.setApplicationName("QueekSync")
     app.setOrganizationName("QueekSync")
+    print(f"QueekSync: crash log -> {crash_log}", flush=True)
 
-    window = QueekSyncApp()
+    window = QueekSyncApp(compact=True)   # icon rail + docked activity bar
     window.resize(1060, 780)                        # compact: fits 1080p, no scrolling
     window.setMinimumSize(900, 620)
     window.setStyleSheet(build_qss(light=False))    # compact launcher is dark-only

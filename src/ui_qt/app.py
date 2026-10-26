@@ -32,6 +32,7 @@ from core.syncer import SyncEngine, SyncEvent
 from core.watcher import WatcherManager
 from ui_qt import theme as T
 from ui_qt.sidebar import Sidebar
+from ui_qt.activity_bar import ActivityBar
 from ui_qt.status_popup import StatusPopup
 
 _PAGE_TITLES = {
@@ -43,8 +44,9 @@ _PAGE_TITLES = {
 class QueekSyncApp(QMainWindow):
     """Application entry-point; owns the main QMainWindow and all shared state."""
 
-    def __init__(self) -> None:
+    def __init__(self, compact: bool = False) -> None:
         super().__init__()
+        self._compact = compact
 
         # ---- configuration & data ---------------------------------
         self.config_mgr = ConfigManager()
@@ -106,7 +108,7 @@ class QueekSyncApp(QMainWindow):
         root.setSpacing(0)
 
         # Sidebar
-        self.sidebar = Sidebar(on_navigate=self.navigate)
+        self.sidebar = Sidebar(on_navigate=self.navigate, compact=self._compact)
         root.addWidget(self.sidebar)
 
         # Content container
@@ -127,6 +129,8 @@ class QueekSyncApp(QMainWindow):
         header_layout.addWidget(self._header_title)
         header_layout.addStretch()
         content_layout.addWidget(header)
+        if self._compact:
+            header.setVisible(False)   # the step bar says where you are
 
         # Panel host (stacked)
         self._stack = QStackedWidget(content)
@@ -134,8 +138,15 @@ class QueekSyncApp(QMainWindow):
 
         root.addWidget(content, 1)
 
-        # Floating activity window — replaces the removed Monitor page.
-        self.status_popup = StatusPopup(self)
+        # Activity surface: a pinned bar in the compact build (it must never
+        # cover the tables), the floating window in the full build. Both expose
+        # the same API, so report_activity/_dispatch_event do not care which.
+        if self._compact:
+            self.activity_bar = ActivityBar(self)
+            content_layout.addWidget(self.activity_bar)
+            self.status_popup = self.activity_bar
+        else:
+            self.status_popup = StatusPopup(self)
 
         self.navigate("peer")  # compact launch: peer + settings only
 
