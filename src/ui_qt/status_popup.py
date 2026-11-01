@@ -19,7 +19,9 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from PyQt6.QtCore import QEvent, QPoint, Qt
+import time
+
+from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -30,7 +32,11 @@ from PyQt6.QtWidgets import (
 
 from ui_qt import theme as T
 from ui_qt.widgets import (
+    IDLE_HIDE_ERROR_MS,
+    IDLE_HIDE_MS,
     HSeparator,
+    completion_footer,
+    completion_headline,
     IconButton,
     LogViewer,
     MutedLabel,
@@ -50,6 +56,10 @@ _KIND_COLORS: Dict[str, str] = {
     "error":   T.ERROR,
     "warning": T.WARNING,
 }
+
+# How long a finished job stays on screen before the window hides itself.
+_IDLE_HIDE_MS = IDLE_HIDE_MS
+_IDLE_HIDE_ERROR_MS = IDLE_HIDE_ERROR_MS
 
 # Counters kept on the "so far" line
 _COUNTED = ("compare", "copy", "delete", "skip", "error")
@@ -75,6 +85,12 @@ class StatusPopup(QFrame):
         self._expanded = True
         self._drag_from: Optional[QPoint] = None
         self._counts: Dict[str, int] = {}
+        self._job_label = ""
+        self._job_started: Optional[float] = None
+
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.timeout.connect(self._hide_when_idle)
 
         self._build()
         self.hide()
@@ -145,8 +161,31 @@ class StatusPopup(QFrame):
     # Public API
     # ------------------------------------------------------------------
 
+    # -- auto-hide -----------------------------------------------------
+    def _wake(self) -> None:
+        """Activity: cancel a pending auto-hide and make sure the window is up."""
+        self._idle_timer.stop()
+        if not self.isVisible():
+            self.reveal()
+
+    def _schedule_hide(self, ok: bool) -> None:
+        self._idle_timer.start(_IDLE_HIDE_MS if ok else _IDLE_HIDE_ERROR_MS)
+
+    def _hide_when_idle(self) -> None:
+        """Fold the window away — unless a job has started in the meantime."""
+        if getattr(self._badge, "_status", "") == "running":
+            return
+        self._expanded = False
+        self._log.setVisible(False)
+        self._sep.setVisible(False)
+        self._fold_btn.setText("▶")
+        self.hide()
+
     def begin_job(self, label: str, compare_only: bool = False) -> None:
         """A sync/compare just started: reset counters, show, go busy."""
+        self._idle_timer.stop()
+        self._job_label = label
+        self._job_started = time.monotonic()
         self._counts = {k: 0 for k in _COUNTED}
         verb = "Comparing" if compare_only else "Syncing"
         self._append(f"— {verb}: {label} —", "ts")
@@ -166,7 +205,11 @@ class StatusPopup(QFrame):
         self._set_action(text, kind)
         if kind in ("success", "error", "connected"):
             # a settled status (e.g. "Connected to …") must not leave the marquee
-            # or the "Running…" badge behind
+            # or the "Running…" badge behind, and the window folds away after it.
+            # Wake FIRST: _wake() stops the idle timer, so scheduling before it
+            # would cancel the very hide we just asked for.
+            self._wake()
+            self._schedule_hide(kind != "error")
             self._badge.set_status(kind)
             self._paint_bar(T.ERROR if kind == "error" else T.SUCCESS)
             self._bar.set_determinate(1.0)
@@ -178,14 +221,23 @@ class StatusPopup(QFrame):
         if busy:
             self._badge.set_status("running")
         self._refresh_detail()
-        if not self.isVisible():
-            self.reveal()
+        # Only real activity pops the window open. A plain info line (e.g. "Folder
+        # lists loaded") must not flash it at the user or undo an auto-hide.
+        if busy:
+            self._wake()
 
     def finish(self, ok: bool, message: str) -> None:
-        """A job ended: stop the bar, set the final state."""
+        """A job ended: stop the bar, say what was done, then fold away."""
+        self._wake()
+        self._schedule_hide(ok)
         self._badge.set_status("success" if ok else "error")
-        self._set_action(message, "success" if ok else "error")
-        self._append(message, "success" if ok else "error")
+        kind = "success" if ok else "error"
+        headline = completion_headline(ok, message)
+        self._set_action(headline, kind)
+        self._append(headline, kind)
+        # the footer answers "what was done": counters, then how long it took
+        self._detail.setText(completion_footer(ok, self._counters_text(),
+                                               getattr(self, "_job_started", None)))
         if ok:
             self._paint_bar(T.SUCCESS)
             self._bar.set_determinate(1.0)
@@ -193,7 +245,6 @@ class StatusPopup(QFrame):
             self._paint_bar(T.ERROR)
             self._bar.stop_indeterminate()
             self._bar.setValue(max(0, self._bar.value()))   # no -1 from the marquee
-        self._refresh_detail()
 
     def on_sync_event(self, event) -> None:
         """Feed a SyncEvent from the app's event pump."""
@@ -217,7 +268,8 @@ class StatusPopup(QFrame):
         self.set_status(message, kind, progress=progress, busy=(progress <= 0))
 
     def toggle(self) -> None:
-        """Show/hide the window (the Activity button)."""
+        """Show/hide the window (the Activity button). A manual show stays up."""
+        self._idle_timer.stop()
         if self.isVisible():
             self.hide()
         else:
@@ -258,14 +310,17 @@ class StatusPopup(QFrame):
         stamp = __import__("datetime").datetime.now().strftime("%H:%M:%S")
         self._log.append(f"[{stamp}]  {text}", tag=kind if kind in T.LOG_COLORS else "info")
 
-    def _refresh_detail(self) -> None:
+    def _counters_text(self) -> str:
         parts = []
         for key, label in (("compare", "compared"), ("copy", "copied"),
                            ("delete", "deleted"), ("skip", "skipped"), ("error", "errors")):
             n = self._counts.get(key, 0)
             if n:
                 parts.append(f"{n} {label}")
-        self._detail.setText("  ·  ".join(parts))
+        return "  ·  ".join(parts)
+
+    def _refresh_detail(self) -> None:
+        self._detail.setText(self._counters_text())
 
     def _reposition(self) -> None:
         parent = self._app

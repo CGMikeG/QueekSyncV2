@@ -9,9 +9,10 @@ line and expands its log upwards, so it never covers the tables.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -21,7 +22,9 @@ from PyQt6.QtWidgets import (
 )
 
 from ui_qt import theme as T
-from ui_qt.widgets import GhostButton, LogViewer, ProgressBar, StatusBadge, attach_tooltip
+from ui_qt.widgets import (GhostButton, IDLE_HIDE_ERROR_MS, IDLE_HIDE_MS, LogViewer,
+                           ProgressBar, StatusBadge, attach_tooltip, completion_footer,
+                           completion_headline)
 
 _KIND_COLORS: Dict[str, str] = {
     "info":    T.TEXT,
@@ -33,6 +36,11 @@ _KIND_COLORS: Dict[str, str] = {
     "error":   T.ERROR,
     "warning": T.WARNING,
 }
+
+# After a job finishes the bar folds itself away, so an idle window is not left
+# with a strip of stale "done" text. Delays live in ui_qt.widgets.
+_IDLE_HIDE_MS = IDLE_HIDE_MS
+_IDLE_HIDE_ERROR_MS = IDLE_HIDE_ERROR_MS
 
 _COUNTED = ("compare", "copy", "delete", "skip", "error")
 
@@ -52,6 +60,9 @@ class ActivityBar(QFrame):
         )
         self._expanded = False
         self._counts: Dict[str, int] = {k: 0 for k in _COUNTED}
+        self._job_label = ""
+        self._job_started: Optional[float] = None
+        self._idle_timer = self._make_idle_timer()
         self._build()
 
     # ------------------------------------------------------------------
@@ -111,7 +122,34 @@ class ActivityBar(QFrame):
     # Public API — identical to StatusPopup
     # ------------------------------------------------------------------
 
+    def _make_idle_timer(self) -> QTimer:
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._hide_when_idle)
+        return timer
+
+    def _wake(self) -> None:
+        """Activity: cancel any pending auto-hide and make sure the bar is shown."""
+        self._idle_timer.stop()
+        if not self.isVisible():
+            self.show()
+
+    def _schedule_hide(self, ok: bool) -> None:
+        self._idle_timer.start(_IDLE_HIDE_MS if ok else _IDLE_HIDE_ERROR_MS)
+
+    def _hide_when_idle(self) -> None:
+        """Fold the bar away — unless a job has started in the meantime."""
+        if self._badge._status == "running":
+            return
+        self._expanded = False
+        self._log.setVisible(False)
+        self._fold_btn.setText("log ▴")
+        self.hide()
+
     def begin_job(self, label: str, compare_only: bool = False) -> None:
+        self._wake()
+        self._job_label = label
+        self._job_started = time.monotonic()
         self._counts = {k: 0 for k in _COUNTED}
         verb = "Comparing" if compare_only else "Syncing"
         self._append(f"— {verb}: {label} —", "ts")
@@ -124,6 +162,7 @@ class ActivityBar(QFrame):
 
     def set_status(self, text: str, kind: str = "info", progress: Optional[float] = None,
                    busy: bool = False) -> None:
+        self._wake()
         if kind in self._counts:
             self._counts[kind] += 1
         self._append(text, kind)
@@ -133,6 +172,7 @@ class ActivityBar(QFrame):
             # A plain status such as "Connected to …" is not a running job: settle
             # the bar (green / red, static) instead of leaving the marquee running
             # for ever, which read as "still working" long after connecting.
+            self._schedule_hide(kind != "error")
             self._badge.set_status(kind)
             self._paint_bar(T.ERROR if kind == "error" else T.SUCCESS)
             self._bar.set_determinate(1.0)
@@ -146,9 +186,16 @@ class ActivityBar(QFrame):
         self._refresh_detail()
 
     def finish(self, ok: bool, message: str) -> None:
+        self._wake()
+        self._schedule_hide(ok)
         self._badge.set_status("success" if ok else "error")
-        self._set_action(message, "success" if ok else "error")
-        self._append(message, "success" if ok else "error")
+        kind = "success" if ok else "error"
+        headline = completion_headline(ok, message)
+        self._set_action(headline, kind)
+        self._append(headline, kind)
+        # the footer answers "what was done": counters, then how long it took
+        self._detail.setText(completion_footer(ok, self._counters_text(),
+                                               getattr(self, "_job_started", None)))
         self._bar.setVisible(True)
         if ok:
             self._paint_bar(T.SUCCESS)
@@ -157,7 +204,6 @@ class ActivityBar(QFrame):
             self._paint_bar(T.ERROR)
             self._bar.stop_indeterminate()
             self._bar.setValue(max(0, self._bar.value()))
-        self._refresh_detail()
 
     def on_sync_event(self, event) -> None:
         kind = getattr(event, "kind", "info")
@@ -178,7 +224,12 @@ class ActivityBar(QFrame):
         self.set_status(message, kind, progress=progress, busy=(progress <= 0))
 
     def toggle(self) -> None:
-        """The panel's Activity button: show/hide the log."""
+        """The panel's Activity button: bring the bar back, then show/hide the log."""
+        if not self.isVisible():
+            self._wake()
+            if not self._expanded:
+                self.toggle_log()
+            return
         self.toggle_log()
 
     def toggle_log(self) -> None:
@@ -187,7 +238,8 @@ class ActivityBar(QFrame):
         self._fold_btn.setText("log ▾" if self._expanded else "log ▴")
 
     def reveal(self) -> None:
-        """Compatibility with the floating window: the bar is always visible."""
+        """Show the bar (and keep it up: a manual reveal is not auto-hidden)."""
+        self._idle_timer.stop()
         self.show()
 
     # ------------------------------------------------------------------
@@ -211,11 +263,14 @@ class ActivityBar(QFrame):
             f"QProgressBar::chunk {{ background-color: {color}; border-radius: 2px; }}"
         )
 
-    def _refresh_detail(self) -> None:
+    def _counters_text(self) -> str:
         parts = []
         for key, label in (("compare", "compared"), ("copy", "copied"),
                            ("delete", "deleted"), ("skip", "skipped"), ("error", "errors")):
             n = self._counts.get(key, 0)
             if n:
                 parts.append(f"{n} {label}")
-        self._detail.setText("  ·  ".join(parts))
+        return "  ·  ".join(parts)
+
+    def _refresh_detail(self) -> None:
+        self._detail.setText(self._counters_text())

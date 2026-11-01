@@ -5,6 +5,7 @@ Reusable Qt widgets for the QueekSync UI.
 from __future__ import annotations
 
 import math
+import time
 import weakref
 from typing import Callable, List, Optional
 
@@ -44,6 +45,41 @@ from ui_qt import theme as T
 _GRADIENT_STOPS = ("#3b82f6", "#5b9cf8", "#60a5fa", "#5b9cf8", "#3b82f6")
 _GRADIENT_SAMPLES = 16      # interpolation points across the text
 _CLOCK_INTERVAL_MS = 110    # ~9 fps: smoother to the eye, easier on the CPU
+# ---------------------------------------------------------------------------
+# "What just happened" wording, shared by both activity surfaces
+# ---------------------------------------------------------------------------
+
+_COMPLETION_MAX = 90        # characters of the engine's message we keep
+
+
+def completion_headline(ok: bool, message: str) -> str:
+    """The line shown when a job ends, e.g. "✔ Task completed — Sync finished"."""
+    verb = "Task completed" if ok else "Task failed"
+    mark = "✔" if ok else "✖"
+    text = (message or "").strip().rstrip(". ")
+    if len(text) > _COMPLETION_MAX:
+        text = text[: _COMPLETION_MAX - 1] + "…"
+    return f"{mark} {verb} — {text}" if text else f"{mark} {verb}"
+
+
+def completion_footer(ok: bool, counters: str, started: Optional[float] = None) -> str:
+    """The footer under it: what the job actually did, and how long it took."""
+    took = ""
+    if started is not None:
+        elapsed = max(0.0, time.monotonic() - started)
+        took = "under a second" if elapsed < 1 else f"{elapsed:.0f} s"
+    if not counters:
+        # a compare that found nothing to do, or a job that died before doing much
+        lead = "no changes needed" if ok else "see the log for details"
+        return f"{lead}  ·  {took}" if took else lead
+    return f"{counters}  ·  {took}" if took else counters
+
+
+# How long a finished job's status stays on screen before folding itself away.
+# Errors linger longer: they are worth reading. Shared by both activity surfaces.
+IDLE_HIDE_MS = 6000
+IDLE_HIDE_ERROR_MS = 15000
+
 _GLOW_PAD = 6               # horizontal room so a halo is not clipped
 _GLOW_PAD_V = 5             # vertical room, on top of the caller's label height
 

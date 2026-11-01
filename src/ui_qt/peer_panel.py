@@ -738,6 +738,16 @@ class PeerSyncPanel(QWidget):
         plan_layout.setContentsMargins(T.PAD_MD, T.PAD_MD, T.PAD_MD, T.PAD_MD)
         plan_layout.setSpacing(T.PAD_SM)
 
+        # Sync selected gets its own row on the right; the four helper actions sit
+        # beneath it, so the primary action is never mixed in with them.
+        sync_row = QHBoxLayout()
+        sync_row.setSpacing(T.PAD_SM)
+        sync_row.addStretch()
+        self._sync_btn = GradientButton("▶  Sync selected", plan_card,
+                                        command=self._sync_selected, accent=True)
+        sync_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        plan_layout.addLayout(sync_row)
+
         actions_row = QHBoxLayout()
         actions_row.setSpacing(T.PAD_SM)
         compare_btn = GradientButton("≋  Compare", plan_card, command=self._compare_selected)
@@ -752,13 +762,12 @@ class PeerSyncPanel(QWidget):
                                                command=self._sync_remote_list)
         actions_row.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         actions_row.addStretch()
-        self._sync_btn = GradientButton("▶  Sync selected", plan_card,
-                                        command=self._sync_selected, accent=True)
-        actions_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         plan_layout.addLayout(actions_row)
 
+        # Sync options sit on the right, under the Sync selected button they apply to.
         settings_row = QHBoxLayout()
         settings_row.setSpacing(T.PAD_SM)
+        settings_row.addStretch()
         settings_label = MutedLabel("Sync direction")
         settings_row.addWidget(settings_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self._direction_combo = QComboBox(plan_card)
@@ -772,7 +781,6 @@ class PeerSyncPanel(QWidget):
         self._copy_missing_cb = QCheckBox("Copy one-sided folders")
         self._copy_missing_cb.setChecked(True)
         settings_row.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
-        settings_row.addStretch()
         plan_layout.addLayout(settings_row)
 
         attach_tooltip(compare_btn,
