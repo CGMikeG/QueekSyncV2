@@ -76,6 +76,8 @@ from ui_qt import theme as T
 from ui_qt.widgets import (
     GhostButton,
     GlassCard,
+    GradientButton,
+    GradientLabel,
     IconButton,
     LabelledEntry,
     MutedLabel,
@@ -84,6 +86,12 @@ from ui_qt.widgets import (
     SectionLabel,
     attach_tooltip,
 )
+
+# Dark-green palette for the two computer titles, plus the halo colour. The glyphs
+# stay dark; the animated glow is what makes them readable on the dark panel.
+_DARK_GREEN_STOPS = ("#065f46", "#059669", "#10b981", "#34d399",
+                     "#10b981", "#059669", "#065f46")
+_GLOW_GREEN = "#22c55e"
 
 if TYPE_CHECKING:
     from ui_qt.app import QueekSyncApp
@@ -557,7 +565,15 @@ class PeerSyncPanel(QWidget):
         step_row.addStretch()
         self._status_lbl = MutedLabel("Connect to the other computer to begin.")
         step_row.addWidget(self._status_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._activity_btn = GhostButton("◆  Activity", stepbar, command=self._toggle_activity)
+        self._refresh_conn_btn = GradientButton("⟳  Refresh", stepbar,
+                                                command=self._refresh_connection, accent=True)
+        self._refresh_conn_btn.setVisible(False)      # only meaningful once connected
+        step_row.addWidget(self._refresh_conn_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        attach_tooltip(self._refresh_conn_btn,
+                       "Drop the SSH session and log in to the other computer again, keeping the "
+                       "same details. Use it when the other computer stops answering or its "
+                       "folders look out of date.")
+        self._activity_btn = GradientButton("◆  Activity", stepbar, command=self._toggle_activity)
         step_row.addWidget(self._activity_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         attach_tooltip(self._activity_btn,
                        "Show or hide the activity log pinned at the bottom of the window: "
@@ -567,17 +583,7 @@ class PeerSyncPanel(QWidget):
         # A vertical splitter rather than a scroll area: the folder list and the
         # results table share the height, and the divider between them can be
         # dragged. Its handle stays visible (the styled 7 px bar) so it is findable.
-        self._splitter = QSplitter(Qt.Orientation.Vertical, self)
-        self._splitter.setObjectName("StepSplitter")
-        self._splitter.setChildrenCollapsible(False)
-        self._splitter.setHandleWidth(7)
-        self._splitter.setStyleSheet(
-            f"QSplitter#StepSplitter {{ background-color: {T.BG_ROOT}; }}"
-            f"QSplitter#StepSplitter::handle {{ background-color: {T.BG_PANEL}; }}"
-            f"QSplitter#StepSplitter::handle:hover {{ background-color: {T.ACCENT}; }}"
-            f"QSplitter#StepSplitter::handle:pressed {{ background-color: {T.ACCENT_HOVER}; }}"
-        )
-        self._splitter.setContentsMargins(T.PAD_LG, T.PAD_MD, T.PAD_LG, T.PAD_LG)
+        self._splitter = self._make_splitter("StepSplitter", margins=True)
         host = self          # cards are reparented into the splitter below
         root.addWidget(self._splitter, 1)   # absorbs the leftover height
 
@@ -613,15 +619,16 @@ class PeerSyncPanel(QWidget):
 
         saved_btn_row = QHBoxLayout()
         saved_btn_row.setSpacing(6)
-        self._load_conn_btn = PrimaryButton("Load", conn_card, command=self._load_connection)
+        self._load_conn_btn = GradientButton("Load", conn_card, command=self._load_connection,
+                                             accent=True)
         saved_btn_row.addWidget(self._load_conn_btn)
-        new_conn_btn = GhostButton("New", conn_card, command=self._new_connection)
+        new_conn_btn = GradientButton("New", conn_card, command=self._new_connection)
         saved_btn_row.addWidget(new_conn_btn)
-        save_conn_btn = GhostButton("Save", conn_card, command=self._save_connection)
+        save_conn_btn = GradientButton("Save", conn_card, command=self._save_connection)
         saved_btn_row.addWidget(save_conn_btn)
-        self._rename_conn_btn = GhostButton("Rename", conn_card, command=self._rename_connection)
+        self._rename_conn_btn = GradientButton("Rename", conn_card, command=self._rename_connection)
         saved_btn_row.addWidget(self._rename_conn_btn)
-        self._delete_conn_btn = GhostButton("Delete", conn_card, command=self._delete_connection)
+        self._delete_conn_btn = GradientButton("Delete", conn_card, command=self._delete_connection)
         saved_btn_row.addWidget(self._delete_conn_btn)
         saved_btn_row.addStretch()
         saved_col.addLayout(saved_btn_row)
@@ -658,15 +665,17 @@ class PeerSyncPanel(QWidget):
         form_col.addLayout(grid)
 
         conn_row = QHBoxLayout()
+        conn_row.setSpacing(6)      # GradientButtons paint edge to edge without it
         self._remember_cb = QCheckBox("Remember password")
         self._remember_cb.setChecked(True)
         conn_row.addWidget(self._remember_cb)
         attach_tooltip(self._remember_cb,
                        "Store the password with the saved connection. Stored in plaintext in the "
                        "app config folder, like SFTP profile passwords.")
-        self._connect_btn = PrimaryButton("Connect", conn_card, command=self._connect)
+        self._connect_btn = GradientButton("Connect", conn_card, command=self._connect,
+                                           accent=True)
         conn_row.addWidget(self._connect_btn)
-        self._disconnect_btn = GhostButton("Disconnect", conn_card, command=self._disconnect)
+        self._disconnect_btn = GradientButton("Disconnect", conn_card, command=self._disconnect)
         self._disconnect_btn.setEnabled(False)
         conn_row.addWidget(self._disconnect_btn)
         conn_row.addStretch()
@@ -687,19 +696,22 @@ class PeerSyncPanel(QWidget):
         roots_row = QHBoxLayout()
         roots_row.setSpacing(T.PAD_SM)
         self._local_root = LabelledEntry("This computer – base folder",
-                                        placeholder=str(os.path.expanduser("~")))
+                                        placeholder=str(os.path.expanduser("~")),
+                                        gradient=True)
         self._local_root.set(os.path.expanduser("~"))
         roots_row.addWidget(self._local_root, 1)
-        browse_btn = GhostButton("Browse…", root_card, command=self._browse_local_root)
+        browse_btn = GradientButton("Browse…", root_card, command=self._browse_local_root)
         browse_btn.setFixedSize(90, 34)
         roots_row.addWidget(browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
         fav_btn = IconButton("★", root_card, command=self._toggle_favorite)
         roots_row.addWidget(fav_btn, 0, Qt.AlignmentFlag.AlignBottom)
         sync_list_btn = IconButton("⇄", root_card, command=self._toggle_sync_list)
         roots_row.addWidget(sync_list_btn, 0, Qt.AlignmentFlag.AlignBottom)
-        self._remote_root = LabelledEntry("Other computer – base folder", placeholder="/home/user")
+        self._remote_root = LabelledEntry("Other computer – base folder", placeholder="/home/user",
+                                          gradient=True)
         roots_row.addWidget(self._remote_root, 1)
-        self._remote_browse_btn = GhostButton("Browse…", root_card, command=self._browse_remote_root)
+        self._remote_browse_btn = GradientButton("Browse…", root_card,
+                                                 command=self._browse_remote_root)
         self._remote_browse_btn.setFixedSize(90, 34)
         self._remote_browse_btn.setEnabled(False)
         roots_row.addWidget(self._remote_browse_btn, 0, Qt.AlignmentFlag.AlignBottom)
@@ -714,10 +726,10 @@ class PeerSyncPanel(QWidget):
 
         lists_row = QHBoxLayout()
         lists_row.setSpacing(T.PAD_MD)
-        self._local_list, self._local_header = self._make_folder_list(
-            "This PC  (★ favourite · ⇄ sync list)", lists_row)
-        self._remote_list, self._remote_header = self._make_folder_list(
-            "Other PC  (★ favourite · ⇄ sync list)", lists_row)
+        self._local_list, self._local_header, self._local_fav_list = self._make_folder_list(
+            "This computer", lists_row)
+        self._remote_list, self._remote_header, self._remote_fav_list = self._make_folder_list(
+            "Other computer", lists_row)
         root_layout.addLayout(lists_row, 1)
 
         # ── step 3 · Compare & sync ────────────────────────────────────
@@ -728,18 +740,20 @@ class PeerSyncPanel(QWidget):
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(T.PAD_SM)
-        compare_btn = GhostButton("≋  Compare", plan_card, command=self._compare_selected)
+        compare_btn = GradientButton("≋  Compare", plan_card, command=self._compare_selected)
         actions_row.addWidget(compare_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._quick_btn = GhostButton("»  Quick compare", plan_card,
-                                      command=self._quick_compare_selected)
+        self._quick_btn = GradientButton("»  Quick compare", plan_card,
+                                         command=self._quick_compare_selected)
         actions_row.addWidget(self._quick_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._fav_sync_btn = GhostButton("★  Favourites", plan_card, command=self._sync_favorites)
+        self._fav_sync_btn = GradientButton("★  Favourites", plan_card,
+                                            command=self._sync_favorites)
         actions_row.addWidget(self._fav_sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        self._sync_remote_btn = GhostButton("⇄  Remote list", plan_card,
-                                            command=self._sync_remote_list)
+        self._sync_remote_btn = GradientButton("⇄  Remote list", plan_card,
+                                               command=self._sync_remote_list)
         actions_row.addWidget(self._sync_remote_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         actions_row.addStretch()
-        self._sync_btn = PrimaryButton("▶  Sync selected", plan_card, command=self._sync_selected)
+        self._sync_btn = GradientButton("▶  Sync selected", plan_card,
+                                        command=self._sync_selected, accent=True)
         actions_row.addWidget(self._sync_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         plan_layout.addLayout(actions_row)
 
@@ -826,7 +840,7 @@ class PeerSyncPanel(QWidget):
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 1)
-        self._splitter.setSizes([210, 330, 330])
+        self._splitter.setSizes([180, 420, 280])
 
         self._open_steps: set = {"connect", "folders"}   # shows the flow at launch
         self._apply_steps()
@@ -882,36 +896,115 @@ class PeerSyncPanel(QWidget):
             else:
                 chip.set_state("idle")
 
+    def _make_splitter(self, name: str, margins: bool = False) -> QSplitter:
+        """A vertical splitter with the app's slim, hover-highlighted handle."""
+        splitter = QSplitter(Qt.Orientation.Vertical, self)
+        splitter.setObjectName(name)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(7)
+        splitter.setStyleSheet(
+            f"QSplitter#{name} {{ background-color: transparent; }}"
+            f"QSplitter#{name}::handle {{ background-color: {T.BG_PANEL};"
+            f" border-top: 1px solid {T.BORDER}; border-bottom: 1px solid {T.BORDER}; }}"
+            f"QSplitter#{name}::handle:hover {{ background-color: {T.ACCENT}; }}"
+            f"QSplitter#{name}::handle:pressed {{ background-color: {T.ACCENT_HOVER}; }}"
+        )
+        if margins:
+            splitter.setContentsMargins(T.PAD_LG, T.PAD_MD, T.PAD_LG, T.PAD_LG)
+        return splitter
+
     def _make_folder_list(self, title: str, parent_layout: QHBoxLayout) -> tuple:
+        """One computer's column: title, a favourites box, then every folder.
+
+        Favourites live in their own short box so they stay on screen even when
+        the folder list is long, and the folder list underneath is always A–Z.
+        """
         col = QWidget()
         col_layout = QVBoxLayout(col)
         col_layout.setContentsMargins(0, 0, 0, 0)
         col_layout.setSpacing(4)
-        header_row = QHBoxLayout()
-        header = MutedLabel(title)
-        header.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px; font-weight: 600;")
-        header_row.addWidget(header)
-        header_row.addStretch()
-        col_layout.addLayout(header_row)
 
-        lst = QListWidget()
-        lst.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        lst.setMinimumHeight(88)    # a small floor only: the splitter decides the rest
-        lst.itemChanged.connect(self._on_item_changed)
-        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        lst.customContextMenuRequested.connect(self._on_list_context_menu)
+        # dark green gradient with a green halo that breathes in step with the
+        # animation; everything else in the panel stays blue
+        header = GradientLabel(title, point_size=13,
+                               stops=_DARK_GREEN_STOPS, glow=_GLOW_GREEN)
+        header.setStyleSheet("background: transparent; border: none;")
+        # room for the halo: a label clips to its own rect, so an 18 px high
+        # caption would slice the glow off and crowd the caption underneath
+        header.setMinimumHeight(26)
+        col_layout.addWidget(header)
+
+        # Favourites box — bigger than the folder list by default, and the divider
+        # between the two can be dragged.
+        fav_box = QWidget()
+        fav_layout = QVBoxLayout(fav_box)
+        fav_layout.setContentsMargins(0, 0, 0, 0)
+        fav_layout.setSpacing(4)
+        fav_caption = MutedLabel("★  Favourites")
+        fav_caption.setStyleSheet(
+            f"color: {T.WARNING}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;")
+        fav_layout.addWidget(fav_caption)
+        fav_list = self._make_list_widget()
+        fav_list.setMinimumHeight(70)        # a floor, not a cap: the splitter decides
+        attach_tooltip(fav_list, "This computer's favourites (and the folders the other computer "
+                                "has favourited there). Always shown, never scrolled away.")
+        fav_layout.addWidget(fav_list, 1)
+
+        folders_box = QWidget()
+        folders_layout = QVBoxLayout(folders_box)
+        folders_layout.setContentsMargins(0, 0, 0, 0)
+        folders_layout.setSpacing(4)
+        all_caption = MutedLabel("☰  All folders  ·  A–Z")
+        all_caption.setStyleSheet(
+            f"color: {T.TEXT_MUTED}; font-size: 11px; font-weight: 600; letter-spacing: 0.4px;")
+        folders_layout.addWidget(all_caption)
+        lst = self._make_list_widget()
+        lst.setMinimumHeight(60)             # a small floor only: the splitter decides the rest
         attach_tooltip(lst, "Right-click a folder to add it to favourites (★); right-click a ★ "
                             "favourite to remove it. On the other computer's list the favourite "
                             "is saved on that computer.")
+        folders_layout.addWidget(lst, 1)
+
+        col_split = self._make_splitter("FolderSplitter")
+        col_split.addWidget(fav_box)
+        col_split.addWidget(folders_box)
+        col_split.setStretchFactor(0, 3)     # favourites 3 : folders 2 — favourites lead
+        col_split.setStretchFactor(1, 2)
+        col_split.setSizes([300, 200])
+        attach_tooltip(col_split, "Drag the divider to give more room to the favourites or to "
+                                  "the folder list.")
+        col_layout.addWidget(col_split, 1)
+
+        parent_layout.addWidget(col, 1)
+        return lst, header, fav_list
+
+    def _make_list_widget(self) -> QListWidget:
+        """A folder list: tickable rows, right-click favourites, app styling."""
+        lst = QListWidget()
+        lst.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        lst.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        lst.itemChanged.connect(self._on_item_changed)
+        lst.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        lst.customContextMenuRequested.connect(self._on_list_context_menu)
         lst.setStyleSheet(
             f"QListWidget {{ background-color: {T.BG_INPUT}; border: 1px solid {T.BORDER};"
             f" border-radius: 8px; padding: 4px; }}"
             f"QListWidget::item {{ padding: 4px 2px; border-radius: 4px; }}"
             f"QListWidget::item:selected {{ background-color: {T.BG_HOVER}; }}"
         )
-        col_layout.addWidget(lst, 1)
-        parent_layout.addWidget(col, 1)
-        return lst, header
+        return lst
+
+    def _side_lists(self, side: str) -> tuple:
+        """(all-folders list, favourites list) for one computer."""
+        if side == "local":
+            return self._local_list, self._local_fav_list
+        return self._remote_list, self._remote_fav_list
+
+    def _list_pairs(self):
+        """Every folder list with the computer it belongs to."""
+        for side in ("local", "remote"):
+            for lst in self._side_lists(side):
+                yield lst, side
 
     # ==================================================================
     # Connection
@@ -1182,7 +1275,7 @@ class PeerSyncPanel(QWidget):
 
         self._set_connected_ui(True)
         label = f"{self._peer.username}@{self._peer.host}:{self._peer.port}"
-        self._remote_header.setText(f"Other PC  {self._peer.host}  (★ favourite · ⇄ sync list)")
+        self._remote_header.setText(f"Other computer  ·  {self._peer.host}")
         self._remote_root.set(message)
         self._conn_detail.setText(f"Connected · home: {message}")
         self._status_lbl.setText(f"Connected to {label}.")
@@ -1201,6 +1294,29 @@ class PeerSyncPanel(QWidget):
         self._show_only_step("folders", "review")   # connected: the working view
         self._reload_folders()
 
+    def _refresh_connection(self) -> None:
+        """Log in to the same computer again, keeping the saved details.
+
+        Drops the SSH/SFTP session and reconnects in a fresh worker thread, then
+        reloads both folder lists. Handy when the other computer rebooted, its
+        folders changed, or a long-idle session has gone stale.
+        """
+        if self._peer is None:
+            return
+        host, port, user = self._peer.host, self._peer.port, self._peer.username
+        label = f"{user}@{host}:{port}"
+        self._report(f"Refreshing the connection to {label} …", "info", busy=True)
+        self._status_lbl.setText(f"Refreshing the connection to {label} …")
+        self._status_lbl.setStyleSheet(f"color: {T.INFO}; font-size: 12px;")
+        try:
+            self._peer.disconnect()
+        except Exception:
+            pass
+        self._peer = None
+        # keep this computer's list on screen while the new session comes up
+        self._folders = {"local": self._folders.get("local"), "remote": None}
+        self._connect()
+
     def _disconnect(self) -> None:
         if self._peer is not None:
             try:
@@ -1213,10 +1329,10 @@ class PeerSyncPanel(QWidget):
         self._favs = {"local": None, "remote": None}
         self._sync_lists = {"local": None, "remote": None}
         self._checked = {}
-        self._local_list.clear()
-        self._remote_list.clear()
+        for lst, _side in self._list_pairs():
+            lst.clear()
         self._plan_table.setRowCount(0)
-        self._remote_header.setText("Folders on the other computer  (★ favourite · ⇄ sync list)")
+        self._remote_header.setText("Other computer")
         self._conn_detail.setText("")
         self._status_lbl.setText("Disconnected. Enter the other computer's details to reconnect.")
         self._status_lbl.setStyleSheet(f"color: {T.TEXT_MUTED}; font-size: 12px;")
@@ -1227,6 +1343,7 @@ class PeerSyncPanel(QWidget):
         self._fav_sync_btn.setEnabled(connected)
         self._sync_remote_btn.setEnabled(connected)
         self._remote_browse_btn.setEnabled(connected)
+        self._refresh_conn_btn.setVisible(connected)   # only worth offering once connected
 
     # ==================================================================
     # Folder listing + favourites
@@ -1345,42 +1462,57 @@ class PeerSyncPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _render_lists(self) -> None:
-        self._render_list(self._local_list, "local")
-        self._render_list(self._remote_list, "remote")
+        for side in ("local", "remote"):
+            self._render_side(side)
 
-    def _render_placeholder(self, lst: QListWidget, side: str) -> None:
+    def _render_side(self, side: str) -> None:
+        """Fill this computer's favourites box and its A–Z folder list."""
+        root = self._local_root_text() if side == "local" else self._remote_root_text()
+        favs = self._favs.get(side) or []
+        syncs = self._sync_lists.get(side) or []
+        folders = self._folders.get(side) or []
+        main_list, fav_list = self._side_lists(side)
+
+        def leaf(path: str) -> str:
+            return os.path.basename(path.rstrip("/\\")) or path
+
+        # favourites: their own box, A–Z
+        fav_rows = sorted(((f"fav:{p}", leaf(p), 0.0, "fav", p) for p in favs),
+                          key=lambda row: row[1].lower())
+
+        # everything else: sync-list folders and plain folders together, A–Z
+        fav_norm = {_norm(p) for p in favs}
+        sync_norm = {_norm(p) for p in syncs}
+        rows = [(f"sync:{p}", leaf(p), 0.0, "sync", p) for p in syncs]
+        for f in folders:
+            name = f["name"]
+            path = os.path.join(root, name)
+            if _norm(path) in fav_norm or _norm(path) in sync_norm:
+                continue      # shown in the favourites box / as a sync row already
+            rows.append((f"dir:{_norm(path)}", name, f["mtime"], "dir", path))
+        rows.sort(key=lambda row: row[1].lower())
+
+        self._fill_list(fav_list, fav_rows, side,
+                        empty=("Connect to see the other computer's favourites."
+                               if side == "remote" and self._peer is None
+                               else "No favourites yet — right-click a folder below."))
+        self._fill_list(main_list, rows, side)
+
+    def _render_placeholder(self, lst: QListWidget, side: str,
+                            text: Optional[str] = None) -> None:
         """One muted, non-selectable line so an empty list explains itself."""
-        text = ("Connect to the other computer to load its folders."
-                if side == "remote" and self._peer is None
-                else "No folders here — check the base folder, or click ⟳.")
+        if text is None:
+            text = ("Connect to the other computer to load its folders."
+                    if side == "remote" and self._peer is None
+                    else "No folders here — check the base folder, or click ⟳.")
         item = QListWidgetItem(text)
         item.setFlags(Qt.ItemFlag.NoItemFlags)          # not selectable / not tickable
         item.setForeground(QColor(T.TEXT_DIM))
         item.setData(_R_KIND, "placeholder")
         lst.addItem(item)
 
-    def _render_list(self, lst: QListWidget, side: str) -> None:
-        root = self._local_root_text() if side == "local" else self._remote_root_text()
-        favs = self._favs.get(side) or []
-        syncs = self._sync_lists.get(side) or []
-        folders = self._folders.get(side) or []
-
-        rows: List[Tuple[str, str, float, str, str]] = []  # key, name, mtime, kind, path
-        for p in favs:
-            name = os.path.basename(p.rstrip("/\\")) or p
-            rows.append((f"fav:{p}", name, 0.0, "fav", p))
-        fav_norm = {_norm(p) for p in favs}
-        for p in syncs:
-            name = os.path.basename(p.rstrip("/\\")) or p
-            rows.append((f"sync:{p}", name, 0.0, "sync", p))
-        sync_norm = {_norm(p) for p in syncs}
-        for f in folders:
-            name = f["name"]
-            path = os.path.join(root, name)
-            if _norm(path) in fav_norm or _norm(path) in sync_norm:
-                continue  # already shown as a favourite / sync-list row
-            rows.append((f"dir:{_norm(path)}", name, f["mtime"], "dir", path))
-
+    def _fill_list(self, lst: QListWidget, rows: list, side: str,
+                   empty: Optional[str] = None) -> None:
         lst.blockSignals(True)
         lst.clear()
         for key, name, mtime, kind, path in rows:
@@ -1392,7 +1524,8 @@ class PeerSyncPanel(QWidget):
                 text = f"{name}   ·   {_fmt_mtime(mtime)}"
             item = QListWidgetItem(text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if self._checked.get(key, False) else Qt.CheckState.Unchecked)
+            item.setCheckState(Qt.CheckState.Checked if self._checked.get(key, False)
+                               else Qt.CheckState.Unchecked)
             item.setData(_R_KEY, key)
             item.setData(_R_NAME, name)
             item.setData(_R_MTIME, mtime)
@@ -1406,7 +1539,7 @@ class PeerSyncPanel(QWidget):
                 item.setToolTip(path + "\nOn the other computer's sync list.")
             lst.addItem(item)
         if not rows:
-            self._render_placeholder(lst, side)   # never leave a blank box
+            self._render_placeholder(lst, side, empty)   # never leave a blank box
         lst.blockSignals(False)
 
     # ==================================================================
@@ -1429,7 +1562,7 @@ class PeerSyncPanel(QWidget):
         even when their full paths differ.
         """
         plans: Dict[str, PeerPlan] = {}
-        for lst, side in ((self._local_list, "local"), (self._remote_list, "remote")):
+        for lst, side in self._list_pairs():      # favourites box + folder list, both sides
             for i in range(lst.count()):
                 item = lst.item(i)
                 if item.checkState() != Qt.CheckState.Checked:
@@ -1511,7 +1644,11 @@ class PeerSyncPanel(QWidget):
         """Right-click a folder row: add it to favourites, or remove an
         existing ★ favourite from them."""
         lst = self.sender()
-        if not isinstance(lst, QListWidget) or (lst is not self._local_list and lst is not self._remote_list):
+        if not isinstance(lst, QListWidget):
+            return
+        sides = {id(widget): side for widget, side in self._list_pairs()}
+        side = sides.get(id(lst))
+        if side is None:
             return
         item = lst.itemAt(pos)
         if item is None:
@@ -1521,7 +1658,7 @@ class PeerSyncPanel(QWidget):
         kind = item.data(_R_KIND)
 
         menu = QMenu(self)
-        if lst is self._remote_list:
+        if side == "remote":
             # A favourite for a folder on the other computer is stored in THAT
             # computer's favourites file (over SFTP), so it shows up there too
             # and stays correct when it is the one doing the syncing.
@@ -1761,9 +1898,10 @@ class PeerSyncPanel(QWidget):
 
     def _sync_favorites(self) -> None:
         """Tick every favourite row on both sides, then sync them."""
-        for lst in (self._local_list, self._remote_list):
-            for i in range(lst.count()):
-                item = lst.item(i)
+        for side in ("local", "remote"):
+            _main, fav_list = self._side_lists(side)
+            for i in range(fav_list.count()):
+                item = fav_list.item(i)
                 if item.data(_R_KIND) == "fav":
                     item.setCheckState(Qt.CheckState.Checked)
         self._sync_selected()
@@ -1784,7 +1922,7 @@ class PeerSyncPanel(QWidget):
                 "button to add them, then connect again.")
             return
         remote_names = {os.path.basename(p.rstrip("/\\")) or p for p in remote_sync}
-        for lst in (self._remote_list, self._local_list):
+        for lst, _side in self._list_pairs():
             for i in range(lst.count()):
                 item = lst.item(i)
                 if item.data(_R_NAME) in remote_names:
