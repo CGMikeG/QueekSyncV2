@@ -103,6 +103,8 @@ _VERDICT_LABELS = {
     "mixed":        "Both changed",
     "only_local":   "Only on this PC",
     "only_remote":  "Only on other PC",
+    "new_files_local":  "New files here only",
+    "new_files_remote": "New files on other PC",
     "empty":        "Empty folder",
     "error":        "Error",
 }
@@ -114,6 +116,8 @@ _VERDICT_COLORS = {
     "mixed":        T.WARNING,
     "only_local":   T.INFO,
     "only_remote":  T.INFO,
+    "new_files_local":  T.INFO,
+    "new_files_remote": T.INFO,
     "empty":        T.TEXT_DIM,
     "error":        T.ERROR,
 }
@@ -781,6 +785,13 @@ class PeerSyncPanel(QWidget):
         self._copy_missing_cb = QCheckBox("Copy one-sided folders")
         self._copy_missing_cb.setChecked(True)
         settings_row.addWidget(self._copy_missing_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._code_only_cb = QCheckBox("Program files only")
+        self._code_only_cb.setToolTip(
+            "Compare only source code, scripts, config and project files, ignoring videos, "
+            "images, recordings and generated data. Use it to answer \"which computer has the "
+            "latest software?\" — a folder full of new media would otherwise decide the verdict."
+        )
+        settings_row.addWidget(self._code_only_cb, 0, Qt.AlignmentFlag.AlignVCenter)
         plan_layout.addLayout(settings_row)
 
         attach_tooltip(compare_btn,
@@ -1819,7 +1830,10 @@ class PeerSyncPanel(QWidget):
             self._append_plan_row(plan.key, plan.name, "scanning", "scanning", "…", "…")
         self._open_step_now("review")
 
+        code_only = self._code_only_cb.isChecked()
         scope = f"newest {QUICK_COMPARE_LIMIT} file(s) per folder" if quick else "every file"
+        if code_only:
+            scope += ", program files only"
         what = "Quick comparison" if quick else "Comparison"
         self._plan_status.setText(f"{what} of {len(plans)} folder(s) — {scope} …")
         self._report(f"{what} of {len(plans)} folder(s) — {scope} …", "compare", busy=True)
@@ -1837,14 +1851,16 @@ class PeerSyncPanel(QWidget):
                     remote_path = plan.remote_path or f"{remote_root.rstrip('/')}/{plan.name}"
                     if quick:
                         cmp = quick_compare(self._peer, local_path, remote_path, plan.name,
-                                            QUICK_COMPARE_LIMIT)
+                                            QUICK_COMPARE_LIMIT, code_only=code_only)
                     else:
-                        cmp = compare_pair(self._peer, local_path, remote_path, plan.name)
+                        cmp = compare_pair(self._peer, local_path, remote_path, plan.name,
+                                           code_only=code_only)
                     self._signals.pair_compared.emit(plan.key, cmp)
             except Exception as exc:      # noqa: BLE001
                 self._signals.sync_done.emit(False, f"{what} failed: {exc}")
                 return
-            self._signals.sync_done.emit(True, f"{what} finished for {len(plans)} folder(s).")
+            mode = " — program files only" if code_only else ""
+            self._signals.sync_done.emit(True, f"{what} finished for {len(plans)} folder(s){mode}.")
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1885,7 +1901,11 @@ class PeerSyncPanel(QWidget):
             cell_item = self._plan_table.item(row, col)
             if cell_item is not None:
                 cell_item.setToolTip(tip)   # the cell elides; the tooltip keeps it all
-        verdict_txt = _VERDICT_LABELS.get(cmp.verdict, cmp.verdict)
+        if cmp.code_only and cmp.verdict == "empty":
+            # nothing to compare *as software* is not the same as an empty folder
+            verdict_txt = "No program files"
+        else:
+            verdict_txt = _VERDICT_LABELS.get(cmp.verdict, cmp.verdict)
         verdict_color = _VERDICT_COLORS.get(cmp.verdict, T.TEXT)
         # The two date columns already say when each side changed, so the verdict
         # only names the side (colour-coded) — repeating the date here used to
@@ -1898,6 +1918,9 @@ class PeerSyncPanel(QWidget):
         if cmp.quick:
             verdict_txt += f"  ·  quick {cmp.quick_limit}"   # short: the columns carry the rest
         self._set_verdict_cell(row, 3, verdict_txt, verdict_color)
+        verdict_item = self._plan_table.item(row, 3)
+        if verdict_item is not None:
+            verdict_item.setToolTip(cmp.detail_text())   # counts, and the compare mode
         self._set_cell(row, 4, cmp.sync_action)
 
     # ==================================================================

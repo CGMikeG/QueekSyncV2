@@ -179,6 +179,61 @@ def classify_file_type(name: str) -> str:
             return label
     return _OTHER_CONTENT
 
+
+# ---------------------------------------------------------------------------
+# "Program files only" compare mode
+#
+# A folder of videos, recordings or generated data outweighs the handful of
+# source files in any count-scored verdict, so a folder holding a brand-new
+# project used to read as "that PC has the newer version". This mode restricts
+# the comparison to source code, config and project metadata, which is what
+# actually answers "which computer has the latest software?".
+# ---------------------------------------------------------------------------
+
+PROGRAM_EXTENSIONS = frozenset({
+    # source
+    ".py", ".pyw", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".vue", ".svelte",
+    ".java", ".kt", ".kts", ".scala", ".groovy", ".c", ".h", ".cc", ".cpp", ".cxx",
+    ".hpp", ".hh", ".hxx", ".cs", ".fs", ".vb", ".go", ".rs", ".rb", ".php", ".pl",
+    ".pm", ".lua", ".swift", ".m", ".mm", ".dart", ".r", ".jl", ".ex", ".exs", ".erl",
+    ".hrl", ".clj", ".cljs", ".hs", ".ml", ".mli", ".elm", ".zig", ".nim", ".asm",
+    ".s", ".svelte", ".astro", ".vue",
+    # scripts
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd",
+    # schema / queries / shaders
+    ".sql", ".graphql", ".gql", ".proto", ".glsl", ".vert", ".frag", ".comp",
+    # markup, styles, config
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".json", ".jsonc", ".json5",
+    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties", ".xml", ".qml",
+    ".gradle", ".cmake", ".mk", ".tf", ".hcl", ".dockerfile", ".bicep",
+    # docs that version a project
+    ".md", ".rst", ".ipynb",
+})
+
+PROGRAM_NAMES = frozenset({
+    "makefile", "gnumakefile", "dockerfile", "containerfile", "cmakelists.txt",
+    "requirements.txt", "constraints.txt", "setup.py", "setup.cfg", "pyproject.toml",
+    "manifest.in", "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "tsconfig.json", "jsconfig.json", "vite.config.js", "vite.config.ts",
+    "webpack.config.js", "rollup.config.js", "cargo.toml", "cargo.lock", "go.mod",
+    "go.sum", "gemfile", "gemfile.lock", "composer.json", "pom.xml", "build.gradle",
+    "settings.gradle", "gradlew", "procfile", "tox.ini", "pytest.ini", "ruff.toml",
+    ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".env.example",
+})
+
+
+def is_program_file(rel_path: str) -> bool:
+    """True when a path is source code, a script, config or project metadata."""
+    name = os.path.basename((rel_path or "").replace("\\", "/")).lower()
+    if not name:
+        return False
+    return name in PROGRAM_NAMES or os.path.splitext(name)[1] in PROGRAM_EXTENSIONS
+
+
+def _program_only(files: List[FileInfo]) -> List[FileInfo]:
+    """Keep only the program files, leaving directory rows out."""
+    return [f for f in files if not f.is_dir and is_program_file(f.rel_path)]
+
 # Name of the favourites file each computer keeps in its home directory.
 # It lives in the home dir so the *other* computer can read it over SFTP
 # and show these folders immediately when connecting.
@@ -881,18 +936,20 @@ def _summarize(name: str, path: str, files: List[FileInfo]) -> FolderScan:
     )
 
 
-def _scan_local_files(path: str, exclude: Optional[List[str]]) -> Tuple[List[FileInfo], str, bool]:
+def _scan_local_files(path: str, exclude: Optional[List[str]],
+                      code_only: bool = False) -> Tuple[List[FileInfo], str, bool]:
     """Scan a local folder. Returns (files, error, missing)."""
     try:
         files = LocalFS.scan(path, [], exclude if exclude is not None else DEFAULT_EXCLUDES)
-        return files, "", False
+        return (_program_only(files) if code_only else files), "", False
     except FileNotFoundError:
         return [], "", True
     except Exception as exc:
         return [], str(exc), False
 
 
-def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[str]]) -> Tuple[List[FileInfo], str, bool]:
+def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[str]],
+                       code_only: bool = False) -> Tuple[List[FileInfo], str, bool]:
     """Scan a remote folder. Returns (files, error, missing).
 
     Prefers a single `find` round trip (see ``PeerConnection.walk_files_fast``)
@@ -900,10 +957,14 @@ def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[s
     computer cannot run it.
     """
     excl = exclude if exclude is not None else DEFAULT_EXCLUDES
+
+    def _keep(files: List[FileInfo]) -> List[FileInfo]:
+        return _program_only(files) if code_only else files
+
     try:
         fast = peer.walk_files_fast(path, excl)
         if fast is not None:
-            return fast, "", False
+            return _keep(fast), "", False
     except FileNotFoundError:
         return [], "", True
     except Exception:
@@ -919,7 +980,7 @@ def _scan_remote_files(peer: PeerConnection, path: str, exclude: Optional[List[s
     try:
         with peer.sftp_lock:      # the shared channel: never walk it concurrently
             files = fs.scan(path, [], exclude if exclude is not None else DEFAULT_EXCLUDES)
-        return files, "", False
+        return _keep(files), "", False
     except FileNotFoundError:
         return [], "", True
     except Exception as exc:
@@ -952,14 +1013,16 @@ def compare_pair(
     remote_path: str,
     name: str,
     exclude: Optional[List[str]] = None,
+    code_only: bool = False,
 ) -> PairCompare:
     """Scan both sides of one folder pair and produce a full comparison.
 
     The returned :class:`PairCompare` has the per-file diff counters filled
     in, so its ``verdict`` reflects which side is actually newer.
     """
-    local_files, local_error, local_missing = _scan_local_files(local_path, exclude)
-    remote_files, remote_error, remote_missing = _scan_remote_files(peer, remote_path, exclude)
+    local_files, local_error, local_missing = _scan_local_files(local_path, exclude, code_only)
+    remote_files, remote_error, remote_missing = _scan_remote_files(peer, remote_path, exclude,
+                                                                   code_only)
 
     local = FolderScan(name=name, path=local_path)
     if local_missing:
@@ -978,6 +1041,7 @@ def compare_pair(
         remote = _summarize(name, remote_path, remote_files)
 
     cmp = compare_folders(name, local, remote)
+    cmp.code_only = code_only
     if not (local.error or local.missing or remote.error or remote.missing):
         (
             cmp.local_newer_files,
@@ -998,7 +1062,7 @@ QUICK_COMPARE_LIMIT = 10   # how many newest files each side contributes
 
 
 def _newest_local_files(
-    path: str, limit: int, exclude: List[str]
+    path: str, limit: int, exclude: List[str], code_only: bool = False
 ) -> Tuple[List[FileInfo], str, bool]:
     """The ``limit`` newest local files: (files, error, missing).
 
@@ -1007,17 +1071,23 @@ def _newest_local_files(
     for machines without a GNU `find`.
     """
     target = path.rstrip("/") or "/"
+    # In program-only mode the newest N *program* files are wanted, so ask for a
+    # wider sample: filtering after the cut would hide code behind recent media.
+    want = max(1, int(limit)) * 12 if code_only else max(1, int(limit))
     if _LOCAL_FIND is not None:
         try:
             out = _run_local_find(
                 _NEWEST_TEMPLATE.format(
                     root=shlex.quote(target),
                     prune=_find_prune_clause(exclude),
-                    limit=max(1, int(limit)),
+                    limit=want,
                 )
             )
             if out is not None:
-                return _parse_newest(out, target, exclude), "", False
+                rows = _parse_newest(out, target, exclude)
+                if code_only:
+                    rows = _program_only(rows)[:limit]
+                return rows, "", False
         except FileNotFoundError:
             return [], "", True
         except Exception:
@@ -1028,6 +1098,8 @@ def _newest_local_files(
         return [], "", True
     except Exception as exc:
         return [], str(exc), False
+    if code_only:
+        files = _program_only(files)
     return heapq.nlargest(limit, files, key=lambda f: f.mtime), "", False
 
 
@@ -1038,6 +1110,7 @@ def quick_compare(
     name: str,
     limit: int = QUICK_COMPARE_LIMIT,
     exclude: Optional[List[str]] = None,
+    code_only: bool = False,
 ) -> PairCompare:
     """Compare only the newest ``limit`` files on each side.
 
@@ -1055,25 +1128,28 @@ def quick_compare(
     """
     excl = exclude if exclude is not None else DEFAULT_EXCLUDES
 
-    local_files, local_error, local_missing = _newest_local_files(local_path, limit, excl)
+    local_files, local_error, local_missing = _newest_local_files(local_path, limit, excl,
+                                                                 code_only)
+    sample = max(1, int(limit)) * 12 if code_only else limit   # wide enough to filter
 
     remote_files: List[FileInfo] = []
     remote_error = ""
     remote_missing = False
     try:
-        fast = peer.newest_files_fast(remote_path, limit, excl)
+        fast = peer.newest_files_fast(remote_path, sample, excl)
     except FileNotFoundError:
         fast, remote_missing = None, True
     except Exception as exc:
         fast, remote_error = None, str(exc)
     if fast is not None:
-        remote_files = fast
+        remote_files = _program_only(fast)[:limit] if code_only else fast
     elif not (remote_missing or remote_error):
         # No usable `find` over there: fall back to a full scan, then keep the newest.
-        scanned, remote_error, remote_missing = _scan_remote_files(peer, remote_path, excl)
+        scanned, remote_error, remote_missing = _scan_remote_files(peer, remote_path, excl,
+                                                                   code_only)
         if not (remote_error or remote_missing):
-            remote_files = heapq.nlargest(limit, [f for f in scanned if not f.is_dir],
-                                          key=lambda f: f.mtime)
+            pool = _program_only(scanned) if code_only else [f for f in scanned if not f.is_dir]
+            remote_files = heapq.nlargest(limit, pool, key=lambda f: f.mtime)
 
     local = FolderScan(name=name, path=local_path)
     if local_missing:
@@ -1094,6 +1170,7 @@ def quick_compare(
     cmp = compare_folders(name, local, remote)
     cmp.quick = True
     cmp.quick_limit = limit
+    cmp.code_only = code_only
     if not (local.error or local.missing or remote.error or remote.missing):
         local_names = {f.rel_path for f in local_files}
         remote_names = {f.rel_path for f in remote_files}
@@ -1144,6 +1221,7 @@ class PairCompare:
     only_remote_names: List[str] = field(default_factory=list)  # rel paths
     quick: bool = False          # quick compare: the newest files only
     quick_limit: int = 0         # how many newest files each side contributed
+    code_only: bool = False      # program files only (source, config, metadata)
 
     # ------------------------------------------------------------------
 
@@ -1174,6 +1252,15 @@ class PairCompare:
         ):
             return "in_sync"
 
+        # A brand-new project is not a "newer version". When nothing is actually
+        # newer on either side and every difference is one-sided, say that plainly
+        # instead of letting the file counts crown one computer as newer.
+        if self.local_newer_files == 0 and self.remote_newer_files == 0:
+            if self.only_local_files and not self.only_remote_files:
+                return "new_files_local"
+            if self.only_remote_files and not self.only_local_files:
+                return "new_files_remote"
+
         local_score = self.local_newer_files + self.only_local_files
         remote_score = self.remote_newer_files + self.only_remote_files
         if local_score > remote_score:
@@ -1185,9 +1272,9 @@ class PairCompare:
     @property
     def sync_action(self) -> str:
         v = self.verdict
-        if v == "only_local":
+        if v in ("only_local", "new_files_local"):
             return "copy to other PC"
-        if v == "only_remote":
+        if v in ("only_remote", "new_files_remote"):
             return "copy to this PC"
         if v in ("in_sync", "empty"):
             return "nothing to do"
@@ -1205,7 +1292,10 @@ class PairCompare:
             parts.append(f"{self.only_local_files} only on this PC")
         if self.only_remote_files:
             parts.append(f"{self.only_remote_files} only on other PC")
-        return "  ·  ".join(parts)
+        text = "  ·  ".join(parts)
+        if self.code_only:
+            text += "  ·  program files only"
+        return text
 
     # ------------------------------------------------------------------
     # Pre-sync safety reporting
